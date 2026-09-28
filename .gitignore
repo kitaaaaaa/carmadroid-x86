@@ -1,0 +1,12 @@
+# Build output
+build/
+out/
+.vs/
+*.user
+
+# Runtime data (never commit game files or saves)
+userdata/
+*.apk
+*.obb
+*.log
+*.bmp

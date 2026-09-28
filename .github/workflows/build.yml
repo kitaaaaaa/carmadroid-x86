@@ -14,13 +14,26 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Configure
         run: cmake -S . -B build -A x64
 
       - name: Build
-        run: cmake --build build --config Release --parallel
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --parallel 2>&1 | Tee-Object -FilePath build.log
+          exit $LASTEXITCODE
+
+      - name: Report build errors
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path build.log) {
+            Select-String -Path build.log -Pattern ' error |fatal error|error C\d+|error LNK' |
+              Select-Object -First 30 |
+              ForEach-Object { Write-Output ("::error::" + $_.Line.Trim()) }
+          }
 
       - name: Package
         shell: pwsh

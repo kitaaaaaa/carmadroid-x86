@@ -13,16 +13,29 @@ endif()
 
 include(FetchContent)
 
-# --- Unicorn (ARM CPU emulator), built from source with only the ARM backend -------------------
-set(UNICORN_ARCH "arm" CACHE STRING "" FORCE)
-set(UNICORN_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(UNICORN_INSTALL OFF CACHE BOOL "" FORCE)
-set(UNICORN_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(unicorn
-  GIT_REPOSITORY https://github.com/unicorn-engine/unicorn.git
-  GIT_TAG v2.1.4
-  GIT_SHALLOW TRUE)
-FetchContent_MakeAvailable(unicorn)
+# --- Boost headers (needed by dynarmic: boost::icl and boost::variant, header-only) -------------
+FetchContent_Declare(boost
+  URL https://github.com/boostorg/boost/releases/download/boost-1.86.0/boost-1.86.0-b2-nodocs.tar.gz
+  DOWNLOAD_EXTRACT_TIMESTAMP FALSE)
+FetchContent_GetProperties(boost)
+if(NOT boost_POPULATED)
+  FetchContent_Populate(boost)
+endif()
+set(BOOST_ROOT ${boost_SOURCE_DIR} CACHE PATH "" FORCE)
+set(Boost_INCLUDE_DIR ${boost_SOURCE_DIR} CACHE PATH "" FORCE)
+set(Boost_NO_BOOST_CMAKE ON CACHE BOOL "" FORCE)
+
+# --- dynarmic (ARM -> x86-64 JIT), A32 frontend only -----------------------------------------------
+set(DYNARMIC_FRONTENDS "A32" CACHE STRING "" FORCE)
+set(DYNARMIC_TESTS OFF CACHE BOOL "" FORCE)
+set(DYNARMIC_USE_BUNDLED_EXTERNALS ON CACHE BOOL "" FORCE)
+set(DYNARMIC_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+set(DYNARMIC_USE_PRECOMPILED_HEADERS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(dynarmic
+  GIT_REPOSITORY https://github.com/lioncash/dynarmic.git
+  GIT_TAG a41c380246d3d9f9874f0f792d234dc0cc17c180
+  GIT_SHALLOW FALSE)
+FetchContent_MakeAvailable(dynarmic)
 
 # --- SDL2 (window, OpenGL context, audio, gamepads): official prebuilt Visual C++ package -------
 FetchContent_Declare(sdl2
@@ -34,7 +47,7 @@ FetchContent_MakeAvailable(sdl2)
 file(GLOB SOURCES CONFIGURE_DEPENDS src/*.cpp src/hle/*.cpp)
 add_executable(carmadroid ${SOURCES} third_party/miniz/miniz.c)
 target_include_directories(carmadroid PRIVATE src third_party/miniz ${sdl2_SOURCE_DIR}/include)
-target_link_libraries(carmadroid PRIVATE unicorn ${sdl2_SOURCE_DIR}/lib/x64/SDL2.lib opengl32 winmm)
+target_link_libraries(carmadroid PRIVATE dynarmic ${sdl2_SOURCE_DIR}/lib/x64/SDL2.lib opengl32 winmm)
 target_compile_definitions(carmadroid PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN SDL_MAIN_HANDLED)
 if(MSVC)
   target_compile_options(carmadroid PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W3 /utf-8>)

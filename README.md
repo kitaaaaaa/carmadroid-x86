@@ -4,7 +4,7 @@ Runs the **Android version of Carmageddon** (Stainless Games, 2013, v1.8.507) na
 with analog gamepad support, up to 1080p rendering, an unlocked frame rate and restored content.
 
 The Android release is a 32-bit ARM-only app that no longer runs on modern 64-bit-only phones. This project
-loads the game's original ARM libraries from the APK, runs them on an embedded ARM CPU emulator, and replaces
+loads the game's original ARM libraries from the APK, runs them through an ARM-to-x86-64 JIT, and replaces
 every Android system service the game uses (graphics, audio, input, files, Java calls) with Windows
 equivalents.
 
@@ -87,7 +87,8 @@ cmake --build build --config Release
 
 The output is `build/Release/carmadroid.exe` plus `SDL2.dll`. CMake downloads the dependencies automatically:
 
-- [Unicorn Engine](https://github.com/unicorn-engine/unicorn) 2.1.4, ARM CPU emulation (GPL-2.0), built from source
+- [dynarmic](https://github.com/lioncash/dynarmic), ARM to x86-64 JIT (0BSD), built from source (A32 frontend only)
+- [Boost](https://www.boost.org/) 1.86 headers, needed by dynarmic (Boost Software License)
 - [SDL2](https://github.com/libsdl-org/SDL) 2.32.10, window, OpenGL, audio and gamepads (zlib license), prebuilt
 - [miniz](https://github.com/richgel999/miniz), APK (zip) reading (MIT), vendored in `third_party/`
 
@@ -96,7 +97,7 @@ The output is `build/Release/carmadroid.exe` plus `SDL2.dll`. CMake downloads th
 | Part | Source |
 | --- | --- |
 | ELF loader: maps the `.so` files from the APK, applies relocations, links imports | `src/elf_loader.cpp` |
-| ARM CPU (Unicorn), host-to-guest calls, import thunks, function hooks | `src/cpu.cpp` |
+| ARM CPU (dynarmic JIT), host-to-guest calls, import thunks, function hooks | `src/cpu.cpp` |
 | C library, pthreads, stdio, time, wide chars | `src/hle/libc_*.cpp`, `src/hle/pthread.cpp` |
 | Android NDK: looper, input queue, sensors, assets, config | `src/hle/android.cpp` |
 | Fake JVM for the game's Java calls | `src/hle/jni.cpp`, `src/game_java.cpp` |
@@ -116,5 +117,4 @@ This project contains no code or data from Carmageddon. Carmageddon is a tradema
 You must own the game to use this project. This is an unofficial fan project, not affiliated with or
 endorsed by Stainless Games.
 
-Licensed under the GNU General Public License v2.0 (see `LICENSE`), as required by the Unicorn Engine it
-links against.
+Licensed under the GNU General Public License v2.0 (see `LICENSE`).

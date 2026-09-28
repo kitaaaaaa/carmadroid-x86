@@ -1,7 +1,8 @@
 #pragma once
 #include "common.h"
 #include "memory.h"
-#include <unicorn/unicorn.h>
+#include <memory>
+#include <vector>
 #include <functional>
 #include <initializer_list>
 #include <string>
@@ -91,7 +92,6 @@ private:
 // One emulated CPU per guest thread (each runs on its own host thread).
 // ---------------------------------------------------------------------------
 struct Cpu {
-    uc_engine* uc = nullptr;
     u32 stack_top = 0;
     u32 errno_addr = 0;
     u32 thread_id = 0;
@@ -125,12 +125,21 @@ struct Cpu {
     u32 call(u32 fn, std::initializer_list<u32> args);
     u64 call64(u32 fn, std::initializer_list<u32> args);
 
+    // Stop the current guest thread (pthread_exit): unwinds all nested guest calls.
+    void request_exit(u32 value);
+
     void dump_state(const char* why);
     void backtrace();
+
+    // CPU backend (dynarmic). One JIT per nesting level: host->guest calls made from inside a
+    // guest->host call run on the next level, since a JIT cannot be re-entered.
+    struct Backend;
+    std::vector<std::unique_ptr<Backend>> levels;
+    Backend* active = nullptr;  // level whose registers r()/set_r() access
+    Backend& level(int i);
 };
 
-// Instruction-count profiler (debug): enable with profiler::g_enabled before CPUs are created,
-// then toggle profiler::g_active to choose the measured window.
+// Profiler (debug; not supported by the dynarmic backend, kept for command-line compatibility).
 namespace profiler {
 extern bool g_enabled;
 extern std::atomic<bool> g_active;

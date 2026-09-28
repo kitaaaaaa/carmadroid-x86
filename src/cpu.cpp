@@ -1,6 +1,11 @@
 #include "cpu.h"
 #include "elf_loader.h"
+#include <dynarmic/interface/A32/a32.h>
+#include <dynarmic/interface/A32/config.h>
+#include <dynarmic/interface/exclusive_monitor.h>
 #include <windows.h>
+#include <array>
+#include <atomic>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -163,187 +168,225 @@ u64 RegArgs::u64v() {
 // ===========================================================================
 // Cpu
 // ===========================================================================
+// ===========================================================================
+// Cpu: dynarmic A32 JIT backend
+// ===========================================================================
 thread_local Cpu* Cpu::current = nullptr;
-
-static const int kRegs[16] = {
-    UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2,  UC_ARM_REG_R3,  UC_ARM_REG_R4,  UC_ARM_REG_R5,
-    UC_ARM_REG_R6, UC_ARM_REG_R7, UC_ARM_REG_R8,  UC_ARM_REG_R9,  UC_ARM_REG_R10, UC_ARM_REG_R11,
-    UC_ARM_REG_R12, UC_ARM_REG_SP, UC_ARM_REG_LR, UC_ARM_REG_PC,
-};
 
 namespace profiler {
 bool g_enabled = false;
 std::atomic<bool> g_active{false};
-static std::mutex g_lock;
-static std::unordered_map<u32, u64> g_counts;  // block address -> instructions executed
-static thread_local std::unordered_map<u32, u64>* t_counts;
-static std::vector<std::unordered_map<u32, u64>*> g_all;
-
-static void hook_block(uc_engine*, uint64_t addr, uint32_t size, void*) {
-    if (!g_active.load(std::memory_order_relaxed)) return;
-    if (!t_counts) {
-        t_counts = new std::unordered_map<u32, u64>();
-        std::lock_guard<std::mutex> l(g_lock);
-        g_all.push_back(t_counts);
-    }
-    (*t_counts)[(u32)addr] += size / 4 ? size / 4 : 1;
-}
-
-void report() {
-    std::unordered_map<std::string, u64> by_fn;
-    u64 total = 0;
-    {
-        std::lock_guard<std::mutex> l(g_lock);
-        for (auto* m : g_all)
-            for (auto& [addr, n] : *m) {
-                by_fn[loader::function_of(addr)] += n;
-                total += n;
-            }
-    }
-    {
-        std::vector<std::pair<u64, u32>> blocks;
-        std::lock_guard<std::mutex> l(g_lock);
-        std::unordered_map<u32, u64> merged;
-        for (auto* m : g_all)
-            for (auto& [addr, n] : *m) merged[addr] += n;
-        for (auto& [addr, n] : merged) blocks.push_back({n, addr});
-        std::sort(blocks.rbegin(), blocks.rend());
-        LOGI("==== hottest basic blocks ====");
-        for (size_t i = 0; i < blocks.size() && i < 25; i++)
-            LOGI("%12llu  %s", (unsigned long long)blocks[i].first, symbolize(blocks[i].second).c_str());
-    }
-    std::vector<std::pair<u64, std::string>> v;
-    for (auto& [fn, n] : by_fn) v.push_back({n, fn});
-    std::sort(v.rbegin(), v.rend());
-    LOGI("==== profile: %llu guest instructions ====", (unsigned long long)total);
-    for (size_t i = 0; i < v.size() && i < 60; i++)
-        LOGI("%6.2f%% %12llu  %s", 100.0 * v[i].first / (total ? total : 1), (unsigned long long)v[i].first, v[i].second.c_str());
-}
+void report() { LOGI("profiler: not available with the dynarmic CPU backend"); }
 }  // namespace profiler
 
-static u8* g_kuser_page;
-static std::once_flag g_kuser_once;
+namespace {
 
-static void hook_intr(uc_engine* uc, uint32_t intno, void* user) {
-    Cpu* c = (Cpu*)user;
-    u32 pc = c->pc();
-    if (intno != 2) {
-        c->dump_state("unexpected CPU exception");
-        fatal("CPU exception %u at 0x%08x", intno, pc);
-    }
-    u32 svc_addr = pc - 4;
-    if (svc_addr < mem::THUNK_BASE || svc_addr >= mem::THUNK_BASE + mem::THUNK_SIZE) {
-        c->dump_state("SVC outside thunk region (raw syscall?)");
-        fatal("raw SVC at 0x%08x", svc_addr);
-    }
-    hle::dispatch((svc_addr - mem::THUNK_BASE) / 8, *c);
-    if (c->exiting) uc_emu_stop(uc);
+constexpr u32 kPageBits = 12;
+constexpr u32 kPageSize = 1u << kPageBits;
+
+// Guest page -> host pointer, shared by every JIT (filled once, read-only afterwards).
+std::array<u8*, Dynarmic::A32::UserConfig::NUM_PAGE_TABLE_ENTRIES>* g_page_table;
+u8* g_kuser_page;
+Dynarmic::ExclusiveMonitor* g_monitor;
+std::atomic<size_t> g_next_processor{0};
+constexpr size_t kMaxProcessors = 256;
+
+void map_pages(u32 guest, u32 size, u8* host) {
+    for (u32 off = 0; off < size; off += kPageSize) (*g_page_table)[(guest + off) >> kPageBits] = host + off;
 }
 
-static bool hook_bad_mem(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* user) {
-    Cpu* c = (Cpu*)user;
-    const char* kind = type == UC_MEM_READ_UNMAPPED ? "read" : type == UC_MEM_WRITE_UNMAPPED ? "write"
-                     : type == UC_MEM_FETCH_UNMAPPED ? "fetch" : "protected access";
-    char buf[128];
-    snprintf(buf, sizeof buf, "invalid memory %s at 0x%08llx (size %d)", kind, (unsigned long long)addr, size);
-    c->dump_state(buf);
-    return false;
-}
-
-Cpu::Cpu(u32 tid, u32 stack_size) : thread_id(tid) {
-    std::call_once(g_kuser_once, [] {
+void init_globals() {
+    static std::once_flag once;
+    std::call_once(once, [] {
         g_kuser_page = (u8*)VirtualAlloc(nullptr, 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
         u32* p = (u32*)(g_kuser_page + 0xfe0);
         p[0] = 0xE51FF004;  // ldr pc, [pc, #-4]
         p[1] = hle::thunk_for("__kuser_get_tls");
+
+        g_page_table = new std::array<u8*, Dynarmic::A32::UserConfig::NUM_PAGE_TABLE_ENTRIES>();
+        g_page_table->fill(nullptr);
+        map_pages(mem::THUNK_BASE, mem::THUNK_SIZE, hle::thunk_mem());
+        map_pages(mem::ARENA_BASE, mem::ARENA_END - mem::ARENA_BASE, mem::g_arena);
+        map_pages(mem::KUSER_PAGE, 0x10000, g_kuser_page);
+        g_monitor = new Dynarmic::ExclusiveMonitor(kMaxProcessors);
     });
+}
 
-    if (uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc) != UC_ERR_OK) fatal("uc_open failed");
-    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_CORTEX_A15);
-    uc_ctl_set_tcg_buffer_size(uc, 64u << 20);
+u8* host_ptr(u32 vaddr) {
+    u8* page = (*g_page_table)[vaddr >> kPageBits];
+    return page ? page + (vaddr & (kPageSize - 1)) : nullptr;
+}
 
-    if (uc_mem_map_ptr(uc, mem::THUNK_BASE, mem::THUNK_SIZE, UC_PROT_READ | UC_PROT_EXEC, hle::thunk_mem()))
-        fatal("map thunks failed");
-    if (uc_mem_map_ptr(uc, mem::ARENA_BASE, mem::ARENA_END - mem::ARENA_BASE, UC_PROT_ALL, mem::g_arena))
-        fatal("map arena failed");
-    if (uc_mem_map_ptr(uc, mem::KUSER_PAGE, 0x10000, UC_PROT_READ | UC_PROT_EXEC, g_kuser_page))
-        fatal("map kuser page failed");
+}  // namespace
 
-    // Enable VFP/NEON: CPACR full access to cp10/cp11, then FPEXC.EN
-    u32 cpacr = 0;
-    uc_reg_read(uc, UC_ARM_REG_C1_C0_2, &cpacr);
-    cpacr |= 0xF << 20;
-    uc_reg_write(uc, UC_ARM_REG_C1_C0_2, &cpacr);
-    u32 fpexc = 0x40000000;
-    uc_reg_write(uc, UC_ARM_REG_FPEXC, &fpexc);
+struct Cpu::Backend final : Dynarmic::A32::UserCallbacks {
+    Cpu& cpu;
+    std::unique_ptr<Dynarmic::A32::Jit> jit;
 
-    uc_hook h;
-    uc_hook_add(uc, &h, UC_HOOK_INTR, (void*)hook_intr, this, 1, 0);
-    uc_hook_add(uc, &h, UC_HOOK_MEM_INVALID, (void*)hook_bad_mem, this, 1, 0);
-    if (profiler::g_enabled) uc_hook_add(uc, &h, UC_HOOK_BLOCK, (void*)profiler::hook_block, this, 1, 0);
+    Backend(Cpu& c, size_t code_cache) : cpu(c) {
+        Dynarmic::A32::UserConfig cfg;
+        cfg.callbacks = this;
+        cfg.page_table = g_page_table;
+        cfg.processor_id = g_next_processor++ % kMaxProcessors;
+        cfg.global_monitor = g_monitor;
+        cfg.enable_cycle_counting = false;
+        cfg.code_cache_size = code_cache;
+        cfg.define_unpredictable_behaviour = true;
+        jit = std::make_unique<Dynarmic::A32::Jit>(cfg);
+        jit->SetCpsr(0x10);  // user mode, ARM
+    }
 
+    template <class T>
+    T read(u32 vaddr) {
+        u8* p = host_ptr(vaddr);
+        if (!p || !host_ptr(vaddr + sizeof(T) - 1)) bad_access("read", vaddr, sizeof(T));
+        T v;
+        memcpy(&v, p, sizeof v);
+        return v;
+    }
+    template <class T>
+    void write(u32 vaddr, T v) {
+        u8* p = host_ptr(vaddr);
+        if (!p || !host_ptr(vaddr + sizeof(T) - 1)) bad_access("write", vaddr, sizeof(T));
+        memcpy(p, &v, sizeof v);
+    }
+    template <class T>
+    bool write_exclusive(u32 vaddr, T value, T expected) {
+        u8* p = host_ptr(vaddr);
+        if (!p) bad_access("exclusive write", vaddr, sizeof(T));
+        return std::atomic_ref<T>(*reinterpret_cast<T*>(p)).compare_exchange_strong(expected, value);
+    }
+    [[noreturn]] void bad_access(const char* kind, u32 vaddr, size_t size) {
+        char buf[128];
+        snprintf(buf, sizeof buf, "invalid memory %s at 0x%08x (size %zu)", kind, vaddr, size);
+        cpu.dump_state(buf);
+        fatal("%s", buf);
+    }
+
+    std::uint8_t MemoryRead8(u32 a) override { return read<u8>(a); }
+    std::uint16_t MemoryRead16(u32 a) override { return read<u16>(a); }
+    std::uint32_t MemoryRead32(u32 a) override { return read<u32>(a); }
+    std::uint64_t MemoryRead64(u32 a) override { return read<u64>(a); }
+    void MemoryWrite8(u32 a, std::uint8_t v) override { write(a, v); }
+    void MemoryWrite16(u32 a, std::uint16_t v) override { write(a, v); }
+    void MemoryWrite32(u32 a, std::uint32_t v) override { write(a, v); }
+    void MemoryWrite64(u32 a, std::uint64_t v) override { write(a, v); }
+    bool MemoryWriteExclusive8(u32 a, std::uint8_t v, std::uint8_t e) override { return write_exclusive(a, v, e); }
+    bool MemoryWriteExclusive16(u32 a, std::uint16_t v, std::uint16_t e) override { return write_exclusive(a, v, e); }
+    bool MemoryWriteExclusive32(u32 a, std::uint32_t v, std::uint32_t e) override { return write_exclusive(a, v, e); }
+    bool MemoryWriteExclusive64(u32 a, std::uint64_t v, std::uint64_t e) override { return write_exclusive(a, v, e); }
+
+    void InterpreterFallback(u32 pc, size_t n) override {
+        cpu.dump_state("instruction not supported by the JIT");
+        fatal("interpreter fallback at 0x%08x (%zu instructions)", pc, n);
+    }
+    void ExceptionRaised(u32 pc, Dynarmic::A32::Exception e) override {
+        if (e == Dynarmic::A32::Exception::Yield || e == Dynarmic::A32::Exception::WaitForEvent ||
+            e == Dynarmic::A32::Exception::WaitForInterrupt || e == Dynarmic::A32::Exception::SendEvent ||
+            e == Dynarmic::A32::Exception::SendEventLocal || e == Dynarmic::A32::Exception::PreloadData ||
+            e == Dynarmic::A32::Exception::PreloadDataWithIntentToWrite || e == Dynarmic::A32::Exception::PreloadInstruction)
+            return;  // hints
+        char buf[96];
+        snprintf(buf, sizeof buf, "CPU exception %d at 0x%08x", (int)e, pc);
+        cpu.dump_state(buf);
+        fatal("%s", buf);
+    }
+    void CallSVC(std::uint32_t) override {
+        const u32 svc_addr = jit->Regs()[15] - 4;
+        if (svc_addr == hle::RET_MAGIC) {  // a host->guest call returned
+            jit->HaltExecution();
+            return;
+        }
+        if (svc_addr < mem::THUNK_BASE || svc_addr >= mem::THUNK_BASE + mem::THUNK_SIZE) {
+            cpu.dump_state("SVC outside thunk region (raw syscall?)");
+            fatal("raw SVC at 0x%08x", svc_addr);
+        }
+        hle::dispatch((svc_addr - mem::THUNK_BASE) / 8, cpu);
+        if (cpu.exiting) jit->HaltExecution();
+    }
+    void AddTicks(std::uint64_t) override {}
+    std::uint64_t GetTicksRemaining() override { return 1000000; }
+};
+
+Cpu::Backend& Cpu::level(int i) {
+    while ((int)levels.size() <= i) {
+        // Level 0 runs whole threads; deeper levels only run short callbacks, so give them less cache.
+        levels.push_back(std::make_unique<Backend>(*this, levels.empty() ? (128u << 20) : (16u << 20)));
+    }
+    return *levels[i];
+}
+
+Cpu::Cpu(u32 tid, u32 stack_size) : thread_id(tid) {
+    init_globals();
+    active = &level(0);
     stack_top = mem::alloc_stack(stack_size);
     set_sp(stack_top);
     errno_addr = mem::calloc(1, 4);
 }
 
-Cpu::~Cpu() {
-    if (uc) uc_close(uc);
-    mem::free(errno_addr);
-}
+Cpu::~Cpu() { mem::free(errno_addr); }
 
-u32 Cpu::r(int n) { u32 v = 0; uc_reg_read(uc, kRegs[n], &v); return v; }
-void Cpu::set_r(int n, u32 v) { uc_reg_write(uc, kRegs[n], &v); }
+u32 Cpu::r(int n) { return active->jit->Regs()[n]; }
+void Cpu::set_r(int n, u32 v) { active->jit->Regs()[n] = v; }
 u32 Cpu::sp() { return r(13); }
 void Cpu::set_sp(u32 v) { set_r(13, v); }
 u32 Cpu::lr() { return r(14); }
 void Cpu::set_lr(u32 v) { set_r(14, v); }
 u32 Cpu::pc() { return r(15); }
-u64 Cpu::d(int n) { u64 v = 0; uc_reg_read(uc, UC_ARM_REG_D0 + n, &v); return v; }
-void Cpu::set_d(int n, u64 v) { uc_reg_write(uc, UC_ARM_REG_D0 + n, &v); }
+u64 Cpu::d(int n) {
+    auto& e = active->jit->ExtRegs();
+    return e[n * 2] | ((u64)e[n * 2 + 1] << 32);
+}
+void Cpu::set_d(int n, u64 v) {
+    auto& e = active->jit->ExtRegs();
+    e[n * 2] = (u32)v;
+    e[n * 2 + 1] = (u32)(v >> 32);
+}
 
 u32 Cpu::arg(int i) {
     if (i < 4) return r(i);
     return mem::r32(sp() + (i - 4) * 4);
 }
 
+void Cpu::request_exit(u32 value) {
+    exiting = true;
+    exit_value = value;
+    active->jit->HaltExecution();
+}
+
 u64 Cpu::call64(u32 fn, std::initializer_list<u32> args) {
-    Cpu* prev = current;
+    Cpu* prev_current = current;
     current = this;
-    uc_context* saved = nullptr;
+    Backend* caller = active;
     const bool nested = depth > 0;
-    if (nested) {
-        uc_context_alloc(uc, &saved);
-        uc_context_save(uc, saved);
-    }
-    u32 s = (nested ? sp() : stack_top) - 64;
+    Backend& b = level(depth);
+
+    u32 s = (nested ? caller->jit->Regs()[13] : stack_top) - 64;
     const int n = (int)args.size();
     if (n > 4) s -= (n - 4) * 4;
     s &= ~7u;
+    auto& regs = b.jit->Regs();
     int i = 0;
     for (u32 a : args) {
-        if (i < 4) set_r(i, a);
+        if (i < 4) regs[i] = a;
         else mem::w32(s + (i - 4) * 4, a);
         i++;
     }
-    set_sp(s);
-    set_lr(hle::RET_MAGIC);
+    regs[13] = s;
+    regs[14] = hle::RET_MAGIC;
+    regs[15] = fn & ~1u;
+    b.jit->SetCpsr((fn & 1) ? 0x30 : 0x10);  // Thumb bit from the target address
+    b.jit->SetFpscr(caller->jit->Fpscr());
 
+    active = &b;
     depth++;
-    uc_err err = uc_emu_start(uc, fn, hle::RET_MAGIC, 0, 0);
+    b.jit->Run();
+    b.jit->ClearHalt(Dynarmic::HaltReason::UserDefined1);
     depth--;
-    if (err != UC_ERR_OK && !exiting) {
-        char buf[160];
-        snprintf(buf, sizeof buf, "emulation error '%s' while running %s", uc_strerror(err), symbolize(fn).c_str());
-        dump_state(buf);
-        fatal("%s", buf);
-    }
-    u64 result = r(0) | ((u64)r(1) << 32);
-    if (nested) {
-        uc_context_restore(uc, saved);
-        uc_context_free(saved);
-    }
-    current = prev;
+    u64 result = regs[0] | ((u64)regs[1] << 32);
+    active = caller;
+    current = prev_current;
+    if (exiting && nested) caller->jit->HaltExecution();  // keep unwinding towards the thread's top level
     return result;
 }
 
@@ -353,8 +396,7 @@ void Cpu::dump_state(const char* why) {
     LOGE("==== thread %u: %s ====", thread_id, why);
     for (int i = 0; i < 16; i += 4)
         LOGE("  r%-2d=%08x r%-2d=%08x r%-2d=%08x r%-2d=%08x", i, r(i), i + 1, r(i + 1), i + 2, r(i + 2), i + 3, r(i + 3));
-    u32 cpsr = 0;
-    uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+    u32 cpsr = active->jit->Cpsr();
     LOGE("  cpsr=%08x (%s)", cpsr, (cpsr & 0x20) ? "thumb" : "arm");
     LOGE("  pc = %s", symbolize(pc()).c_str());
     LOGE("  lr = %s", symbolize(lr()).c_str());
@@ -366,6 +408,7 @@ void Cpu::backtrace() {
     u32 s = sp();
     int found = 0;
     for (u32 a = s; a < stack_top && a < s + 0x4000 && found < 16; a += 4) {
+        if (!mem::valid(a, 4)) break;
         u32 v = mem::r32(a);
         Module* m = loader::module_at(v);
         if (m && (v & ~1u) - m->base < m->text_end) {

@@ -297,9 +297,7 @@ HLE(pthread_detach) {
     c.ret(0);
 }
 HLE(pthread_exit) {
-    c.exiting = true;
-    c.exit_value = c.r(0);
-    uc_emu_stop(c.uc);
+    c.request_exit(c.r(0));
 }
 HLE(pthread_self) { c.ret(c.thread_id); }
 HLE(pthread_equal) { c.ret(c.r(0) == c.r(1) ? 1 : 0); }

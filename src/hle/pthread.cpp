@@ -3,6 +3,7 @@
 #include "hle_common.h"
 #include <windows.h>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <thread>

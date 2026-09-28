@@ -1,4 +1,4 @@
-// carmadroid-recomp: runs the Android build of Carmageddon (libParsons.so) on Windows.
+// carmadroid-x86: runs the Android build of Carmageddon (libParsons.so) on Windows.
 #include "common.h"
 #include "cpu.h"
 #include "elf_loader.h"
@@ -45,7 +45,7 @@ void log_line(const char* tag, const char* fmt, ...) {
 
 static void error_box(const std::string& msg) {
     fprintf(stderr, "%s\n", msg.c_str());
-    MessageBoxA(nullptr, msg.c_str(), "carmadroid-recomp", MB_OK | MB_ICONERROR);
+    MessageBoxA(nullptr, msg.c_str(), "carmadroid-x86", MB_OK | MB_ICONERROR);
 }
 
 void fatal(const char* fmt, ...) {

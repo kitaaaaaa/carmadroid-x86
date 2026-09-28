@@ -1,4 +1,4 @@
-# carmadroid-recomp
+# carmadroid-x86
 
 Runs the **Android version of Carmageddon** (Stainless Games, 2013, v1.8.507) natively on 64-bit Windows,
 with analog gamepad support, up to 1080p rendering, an unlocked frame rate and restored content.

@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
-project(carmadroid-recomp C CXX)
+project(carmadroid-x86 C CXX)
 
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-  message(FATAL_ERROR "carmadroid-recomp currently targets 64-bit Windows (MSVC).")
+  message(FATAL_ERROR "carmadroid-x86 currently targets 64-bit Windows (MSVC).")
 endif()
 
 set(CMAKE_CXX_STANDARD 20)

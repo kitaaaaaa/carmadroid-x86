@@ -13,14 +13,20 @@ endif()
 
 include(FetchContent)
 
+# Some of dynarmic's bundled dependencies declare cmake_minimum_required < 3.5, which CMake 4 rejects
+# unless told the project is fine with 3.5 policies.
+if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+  set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+endif()
+
 # --- Boost headers (needed by dynarmic: boost::icl and boost::variant, header-only) -------------
+# SOURCE_SUBDIR points at a directory without a CMakeLists.txt, so Boost is only downloaded and
+# extracted, never configured as a sub-project.
 FetchContent_Declare(boost
   URL https://github.com/boostorg/boost/releases/download/boost-1.86.0/boost-1.86.0-b2-nodocs.tar.gz
-  DOWNLOAD_EXTRACT_TIMESTAMP FALSE)
-FetchContent_GetProperties(boost)
-if(NOT boost_POPULATED)
-  FetchContent_Populate(boost)
-endif()
+  DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+  SOURCE_SUBDIR headers-only)
+FetchContent_MakeAvailable(boost)
 set(BOOST_ROOT ${boost_SOURCE_DIR} CACHE PATH "" FORCE)
 set(Boost_INCLUDE_DIR ${boost_SOURCE_DIR} CACHE PATH "" FORCE)
 set(Boost_NO_BOOST_CMAKE ON CACHE BOOL "" FORCE)

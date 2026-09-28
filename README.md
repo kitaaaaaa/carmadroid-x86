@@ -20,6 +20,11 @@ equivalents.
 Only version 1.8.507 is supported: the port patches the game's code at fixed offsets. The APK is checked at
 startup and other versions are rejected (`--skip-version-check` overrides this, at your own risk).
 
+## Download
+
+Prebuilt Windows builds are on the [Releases page](https://github.com/kitaaaaaa/carmadroid-x86/releases).
+Every push to `main` is also built automatically (see the Actions tab for the latest build artifact).
+
 ## Running
 
 1. Put `carmadroid.exe`, `SDL2.dll`, the APK and the OBB in the same folder.

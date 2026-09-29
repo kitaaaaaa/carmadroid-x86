@@ -223,6 +223,19 @@ int main(int argc, char** argv) {
     if (game_dir.empty() && extract_dir.empty() && fs::exists(default_game_dir / "lib" / "armeabi-v7a" / "libParsons.so") &&
         fs::is_directory(default_game_dir / "DATA"))
         game_dir = default_game_dir.string();
+    // The code patches use fixed offsets in libParsons.so 1.8.507: check it (in the APK or folder opened
+    // with apk::open/open_dir) before anything runs or changes the game files.
+    auto version_ok = [&](const std::string& source) {
+        const u32 crc = apk::crc32_of("lib/armeabi-v7a/libParsons.so");
+        if (crc == kSupportedLibCrc || skip_version_check) return true;
+        char msg[512];
+        snprintf(msg, sizeof msg,
+                 "Unsupported APK: %s\n\nThis port needs Carmageddon for Android version 1.8.507 (armeabi-v7a).\n"
+                 "(libParsons.so CRC %08X, expected %08X.) Use --skip-version-check to try anyway.",
+                 source.c_str(), crc, kSupportedLibCrc);
+        error_box(msg);
+        return false;
+    };
     fs::path apk_path = apk_arg.empty() ? find_file(".apk", "carmageddon") : fs::path(apk_arg);
     fs::path obb_path = obb_arg.empty() ? find_file(".obb", "carmageddon") : fs::path(obb_arg);
     if (!game_dir.empty()) {
@@ -233,6 +246,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         LOGI("running from the unpacked game data in %s", game_dir.c_str());
+        if (!version_ok(game_dir)) return 1;
         // Convert and install the PC content (only when it isn't installed yet, or changed).
         pc_import::install(game_dir, pc_content::g_dir, splat_dir);
         std::string err;
@@ -268,16 +282,7 @@ int main(int argc, char** argv) {
         error_box("Could not open " + apk_path.string() + " as an APK (zip) file.");
         return 1;
     }
-    const u32 crc = apk::crc32_of("lib/armeabi-v7a/libParsons.so");
-    if (crc != kSupportedLibCrc && !skip_version_check) {
-        char msg[512];
-        snprintf(msg, sizeof msg,
-                 "Unsupported APK: %s\n\nThis port needs Carmageddon for Android version 1.8.507 (armeabi-v7a).\n"
-                 "(libParsons.so CRC %08X, expected %08X.) Use --skip-version-check to try anyway.",
-                 apk_path.filename().string().c_str(), crc, kSupportedLibCrc);
-        error_box(msg);
-        return 1;
-    }
+    if (game_dir.empty() && !version_ok(apk_path.filename().string())) return 1;  // (unpacked data: checked above)
     hle::g_config.apk = apk_path.string();
     hle::g_config.obb_host = obb_path.string();
     {

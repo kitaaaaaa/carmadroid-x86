@@ -68,6 +68,8 @@ Unplugging the pad restores your touch control settings.
 | `--race-fps N` / `--menu-fps N` | Frame rate caps (defaults: races uncapped, menus 120) |
 | `--audio-rate N` | FMOD mix rate in Hz (default 48000; the game's original is 24000) |
 | `--censored` | Keep the Android version's pickup substitutions (see below) |
+| `--jit-opt MASK` | dynarmic JIT optimization flags (default `0`, off; `0xFFFF` loads faster but garbles some sounds) |
+| `--record-audio [FILE]` | Record the audio output to a WAV file (default `userdata\audio.wav`) |
 | `--data DIR` | Use a different user data folder |
 | `-v` / `-vv` | More logging |
 

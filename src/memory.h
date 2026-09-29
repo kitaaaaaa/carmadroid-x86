@@ -48,6 +48,7 @@ void free(u32 p);
 u32 usable_size(u32 p);
 u32 strdup(const char* s);
 u32 alloc_stack(u32 size);  // returns stack *top*
+void free_stack(u32 top);   // top as returned by alloc_stack
 
 // Guest "wide" strings are UTF-32 (Android wchar_t is 4 bytes).
 std::u32string wstr(u32 g);

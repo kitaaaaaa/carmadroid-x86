@@ -1,5 +1,6 @@
 #include "memory.h"
 #include <windows.h>
+#include <map>
 #include <mutex>
 #include <vector>
 
@@ -135,18 +136,38 @@ u32 strdup(const char* s) {
     return g;
 }
 
-// Stacks are carved downwards from ARENA_END; each has a 64 KB unused guard gap.
+// Stacks are carved downwards from ARENA_END; each has a 64 KB unused guard gap. Freed stacks go
+// on a free list and are reused (best fit) by later threads.
 static std::mutex g_stack_lock;
 static u32 g_stack_next = ARENA_END;
+static std::map<u32, u32> g_stack_sizes;       // top -> size, for every stack ever carved
+static std::multimap<u32, u32> g_free_stacks;  // size -> top
 
 u32 alloc_stack(u32 size) {
     size = (size + 0xFFFF) & ~0xFFFFu;
     std::lock_guard<std::mutex> l(g_stack_lock);
+    auto it = g_free_stacks.lower_bound(size);
+    if (it != g_free_stacks.end()) {
+        u32 top = it->second;
+        g_free_stacks.erase(it);
+        return top;
+    }
     u32 top = g_stack_next - 0x10000;
     u32 bottom = top - size;
     if (bottom < STACK_BASE) fatal("out of guest stack space");
     g_stack_next = bottom;
+    g_stack_sizes[top] = size;
     return top;
+}
+
+void free_stack(u32 top) {
+    std::lock_guard<std::mutex> l(g_stack_lock);
+    auto it = g_stack_sizes.find(top);
+    if (it == g_stack_sizes.end()) {
+        LOGE("free_stack: 0x%08x is not a guest stack", top);
+        return;
+    }
+    g_free_stacks.emplace(it->second, top);
 }
 
 std::u32string wstr(u32 g) {

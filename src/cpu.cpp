@@ -339,7 +339,10 @@ Cpu::Cpu(u32 tid, u32 stack_size, bool audio) : thread_id(tid), audio_thread(aud
     errno_addr = mem::calloc(1, 4);
 }
 
-Cpu::~Cpu() { mem::free(errno_addr); }
+Cpu::~Cpu() {
+    mem::free(errno_addr);
+    mem::free_stack(stack_top);
+}
 
 u32 Cpu::r(int n) { return active->jit->Regs()[n]; }
 void Cpu::set_r(int n, u32 v) { active->jit->Regs()[n] = v; }

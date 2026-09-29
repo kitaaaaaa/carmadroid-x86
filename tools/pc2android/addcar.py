@@ -84,7 +84,7 @@ def set_text_xml(path, key, value, template_key):
     """TEXT.XML is a spreadsheet: one <Row> per key, a cell per language. Copy the template key's row."""
     s = open(path, 'rb').read().decode('utf-8')
     row_re = r'<Row>(?:(?!</Row>).)*?<Data ss:Type="String">%s</Data>.*?</Row>'
-    esc = value.replace('&', '&amp;').replace('<', '&lt;')
+    esc = value.replace('&', '&amp;').replace('<', '&lt;') if value is not None else None  # None: copy all languages
     m = re.search(row_re % re.escape(key), s, re.S)
     if m:
         start, end = m.span()
@@ -101,7 +101,7 @@ def set_text_xml(path, key, value, template_key):
     for i, c in enumerate(cells):
         if i == 0:
             c = re.sub(r'(<Data ss:Type="String">).*?(</Data>)', r'\g<1>%s\g<2>' % key, c)
-        elif i >= 2:
+        elif i >= 2 and esc is not None:
             c = re.sub(r'(<Data ss:Type="String">).*?(</Data>)', lambda mm: mm.group(1) + esc + mm.group(2), c)
         new_cells.append(c)
     indent = row[len('<Row>'):row.index('<Cell')]
@@ -111,6 +111,16 @@ def set_text_xml(path, key, value, template_key):
     else:
         s = s[:start] + '\r\n   ' + new_row + s[end:]
     open(path, 'wb').write(s.encode('utf-8'))
+
+
+def copy_driver_pictures(content, source, name):
+    """Copies another car's driver portraits (UI/ASSETS/*/DRIVERS) to this car."""
+    for dp, dn, fn in os.walk(os.path.join(content, 'UI', 'ASSETS')):
+        if os.path.basename(dp).upper() != 'DRIVERS':
+            continue
+        src = os.path.join(dp, source.upper() + '.IMG')
+        if os.path.exists(src):
+            shutil.copyfile(src, os.path.join(dp, name.upper() + '.IMG'))
 
 
 def copy_placeholders(content, name, template):

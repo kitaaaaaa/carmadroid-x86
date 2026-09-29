@@ -188,22 +188,26 @@ class PixelmapSource:
         m = self.maps.get(name.upper())
         if not m:
             return None
-        w, h, row, px = m
+        w, h, row, px, own_palette = m
+        palette = own_palette or self.palette
         out = bytearray()
         for y in range(h):
             for x in range(w):
                 i = px[y * row + x]
-                r, g, b = self.palette[i]
+                r, g, b = palette[i] if i < len(palette) else (0, 0, 0)
                 out += bytes((r, g, b, 0 if i == 0 else 255))
         return w, h, out
 
 
 def read_all_pix(path):
-    """name -> (w, h, row bytes, 8-bit pixels) for every pixelmap in a PIX file."""
+    """name -> (w, h, row bytes, 8-bit pixels, own palette or None) for every pixelmap in a PIX file.
+    A pixelmap may carry its own palette as a nested 1x256 pixelmap (header 0x03 type 7, its data 0x21,
+    then 0x22), before its own pixel data (0x21)."""
     data = open(path, 'rb').read()
     res = {}
     p = 0
-    hdr = None
+    cur = None       # [name, w, h, row, type, palette]
+    child = None     # nested palette header
     while p + 8 <= len(data):
         cid, ln = struct.unpack_from('>II', data, p)
         b = data[p + 8:p + 8 + ln]
@@ -211,13 +215,25 @@ def read_all_pix(path):
         if cid in (0x03, 0x3D):
             typ, row, w, h = struct.unpack_from('>BHHH', b, 0)
             name = b[11:].split(b'\0')[0].decode('latin1')
-            hdr = (name.upper(), w, h, row, typ)
-        elif cid == 0x21 and hdr:
+            if cur is None:
+                cur = [name.upper(), w, h, row, typ, None]
+            else:
+                child = (typ, w, h)
+        elif cid == 0x21 and cur:
             count, esize = struct.unpack_from('>II', b, 0)
-            name, w, h, row, typ = hdr
-            if typ == 3:
-                res[name] = (w, h, row, b[8:8 + count * esize])
-            hdr = None
+            px = b[8:8 + count * esize]
+            if child is not None:
+                if child[0] == 7 and esize == 4:  # palette: x, r, g, b
+                    cur[5] = [(px[i * 4 + 1], px[i * 4 + 2], px[i * 4 + 3]) for i in range(min(256, count))]
+            else:
+                name, w, h, row, typ, pal = cur
+                if typ == 3:
+                    res[name] = (w, h, row, px, pal)
+                cur = None
+        elif cid == 0x22:
+            child = None
+        elif cid == 0:
+            cur, child = None, None
     return res
 
 

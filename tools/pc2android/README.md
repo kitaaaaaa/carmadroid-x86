@@ -41,6 +41,9 @@ New cars start locked in career mode. `carmadroid.exe --unlock-all-cars` unlocks
 - Textures are written as uncompressed IMG v1.0, one plane, A,R,G,B per pixel. PC palette index 0 becomes
   transparent (alpha 0), but the template material does not enable transparency yet.
 - Suspension and other moving parts are merged into the body.
+- `splatpack.py` also makes each car's menu pictures (car grid, hub, race grid), driver portrait, info
+  page description (the PC driver blurb) and damage HUD. New Eagle and New Annie reuse Max's and Die
+  Anna's Android portraits and descriptions.
 
 ## Files
 
@@ -54,3 +57,6 @@ New cars start locked in career mode. `carmadroid.exe --unlock-all-cars` unlocks
 | `addcar.py` | Adds a vehicle folder to the roster |
 | `splatpack.py` | Converts and adds all 19 Splat Pack cars (`splatpack.py <Carmageddon1 install> <game dir>`) |
 | `fli.py` | Decodes C1 FLI/FLC animations (driver mugshots, car animations) |
+| `uiimg.py` | Menu pictures: renders car pictures from the converted models, driver portraits from the PC mugshots, writes the game's RLE IMG format |
+| `damagehud.py` | Damage HUD: a top-view silhouette stretched to the HUD frame, and the car's layout with its part markers moved onto the silhouette |
+| `luadis.py` | Lua 5.1 bytecode disassembler (for the compiled UI files) |

@@ -4,7 +4,7 @@ usage: splatpack.py <Carmageddon1 install dir> <unpacked game dir> [--convert-on
 """
 import argparse, os, re, subprocess, sys, traceback
 sys.path.insert(0, os.path.dirname(__file__))
-import c1text, carconv, addcar
+import c1text, carconv, addcar, uiimg, damagehud
 
 # Splat Pack cars that are not in the Android game, with display names
 CARS = {
@@ -14,6 +14,9 @@ CARS = {
     'SPAGHETI': 'SPAGHETTI', 'SUBFRAME': 'SUBFRAME', 'TOOHORSE': 'TWO HORSE', 'V6SHAME': 'V6 SHAME',
     'VLAD2': 'VLAD 2',
 }
+
+
+PLAYER_CARS = {'NEWEAGLE': 'BlkEagle', 'NEWANNIE': 'AnnieCar'}
 
 
 def opponents(splat_data):
@@ -29,7 +32,22 @@ def opponents(splat_data):
             strength = int(L[i - 3].strip())
         except ValueError:
             strength = 3
-        info = {'driver': driver, 'strength': strength}
+        info = {'driver': driver, 'strength': strength, 'mug': L[i - 1].strip()}
+        # text chunks: count, then per chunk: x,y / frames / line count / lines. The last one is the blurb.
+        try:
+            k = i + 2
+            chunks = int(L[k].strip()); k += 1
+            text = []
+            for _ in range(chunks):
+                k += 2
+                n = int(L[k].strip()); k += 1
+                text = [x.strip() for x in L[k:k + n]]
+                k += n
+                while k < len(L) and not L[k].strip():
+                    k += 1
+            info['blurb'] = ' '.join(t for t in text if t)
+        except (ValueError, IndexError):
+            pass
         for l2 in L[i:i + 14]:
             m = re.search(r'TOP SPEED:\s*([\d.]+)', l2)
             if m: info['mph'] = float(m.group(1))
@@ -88,8 +106,25 @@ def main():
         args = [sys.executable, os.path.join(os.path.dirname(__file__), 'addcar.py'), a.game_dir,
                 os.path.join(a.work, car), name, CARS[car], info.get('driver', name), '--template', template,
                 '--specs', specs] + (['--opponent', str(strength)] if is_opponent else [])
+        if car in PLAYER_CARS:
+            args[6] = {'NEWEAGLE': 'Max Damage', 'NEWANNIE': 'Die Anna'}[car]
         r = subprocess.run(args, capture_output=True, text=True)
         print(car, '->', name, 'OK' if r.returncode == 0 else 'FAILED\n' + r.stderr[-800:])
+        if r.returncode:
+            continue
+        mug = os.path.join(splat, 'ANIM', info['mug']) if info.get('mug') else None
+        # The Splat Pack's player cars belong to Max and Die Anna: reuse their Android portraits and text.
+        player = PLAYER_CARS.get(car)
+        uiimg.make_pictures(a.game_dir, name, os.path.join(a.work, car), None if player else mug)
+        damagehud.make_damage_hud(a.game_dir, name, os.path.join(a.work, car))
+        if player:
+            addcar.copy_driver_pictures(content, player, name)
+            addcar.set_text_xml(os.path.join(content, 'TEXT', 'TEXT.XML'), name.upper() + '_INFO', None,
+                                player.upper() + '_INFO')
+        elif info.get('blurb'):
+            addcar.set_text_xml(os.path.join(content, 'TEXT', 'TEXT.XML'), name.upper() + '_INFO',
+                                info['blurb'].upper(), 'BLKEAGLE_INFO')
+        print('   pictures%s' % (' and description' if info.get('blurb') else ''))
 
 
 if __name__ == '__main__':

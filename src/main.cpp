@@ -117,6 +117,10 @@ int main(int argc, char** argv) {
         else if (a == "--exit-after" && i + 1 < argc) exit_after = atoi(argv[++i]);
         else if (a == "--dump-zones") debug::g_dump_zones = true;
         else if (a == "--censored") content::g_restore = false;
+        else if (a == "--record-audio") {  // optional file name; default userdataudio.wav
+            if (i + 1 < argc && argv[i + 1][0] != '-') audio::g_record_path = argv[++i];
+            else audio::g_record_path = "*default*";
+        }
         else if (a == "--jit-opt" && i + 1 < argc) g_jit_optimizations = (u32)strtoul(argv[++i], nullptr, 0);
         else if (a == "--jit-opt-audio" && i + 1 < argc) g_jit_optimizations_audio = (u32)strtoul(argv[++i], nullptr, 0);
         else if (a == "--audio-rate" && i + 1 < argc) audio::g_sample_rate = atoi(argv[++i]);
@@ -209,6 +213,8 @@ int main(int argc, char** argv) {
     }
     platform::g_shot_dir = shots_dir.empty() ? hle::g_config.root + "/shots" : shots_dir;
     if (platform::g_shot_every) fs::create_directories(platform::g_shot_dir);
+    if (audio::g_record_path == "*default*") audio::g_record_path = hle::g_config.root + "/audio.wav";
+    if (!audio::g_record_path.empty()) LOGI("recording audio to %s", audio::g_record_path.c_str());
     LOGI("APK: %s", hle::g_config.apk.c_str());
     LOGI("OBB: %s", hle::g_config.obb_host.c_str());
     LOGI("user data: %s", hle::g_config.root.c_str());

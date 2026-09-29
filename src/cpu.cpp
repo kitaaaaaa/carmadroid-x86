@@ -173,10 +173,12 @@ u64 RegArgs::u64v() {
 // ===========================================================================
 thread_local Cpu* Cpu::current = nullptr;
 
-u32 g_jit_optimizations = 0x0000FFFF;        // all safe optimizations; --jit-opt overrides
+// dynarmic optimizations are off by default: with them, FMOD's audio comes out garbled (beeping,
+// warbling), and they only speed up loading. --jit-opt 0xFFFF turns them all back on.
+u32 g_jit_optimizations = 0;
 // JIT optimizations for FMOD's threads (mixer/streams); same as everything else unless
 // --jit-opt-audio overrides it (kept as a diagnostic switch).
-u32 g_jit_optimizations_audio = 0x0000FFFF;
+u32 g_jit_optimizations_audio = 0;
 
 namespace profiler {
 bool g_enabled = false;

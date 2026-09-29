@@ -12,6 +12,18 @@ namespace {
 enum { INFO_SAMPLERATE = 0, INFO_DSPBUFFERLENGTH = 1, INFO_DSPNUMBUFFERS = 2, INFO_MIXERRUNNING = 3 };
 
 std::atomic<bool> g_running{false};
+
+// --record-audio: writes exactly what is sent to the speakers to a WAV file (debugging).
+FILE* g_wav = nullptr;
+u32 g_wav_bytes = 0;
+void wav_header(FILE* f, int rate, u32 data_bytes) {
+    auto w32 = [&](u32 v) { fwrite(&v, 4, 1, f); };
+    auto w16 = [&](u16 v) { fwrite(&v, 2, 1, f); };
+    fseek(f, 0, SEEK_SET);
+    fwrite("RIFF", 1, 4, f); w32(36 + data_bytes); fwrite("WAVEfmt ", 1, 8, f);
+    w32(16); w16(1); w16(2); w32(rate); w32(rate * 4); w16(4); w16(16);
+    fwrite("data", 1, 4, f); w32(data_bytes);
+}
 std::thread g_thread;
 
 void run() {
@@ -50,8 +62,29 @@ void run() {
         }
         if (cpu.call(get_info, {env, self, INFO_MIXERRUNNING}) != 1) { SDL_Delay(10); continue; }
         while (g_running && SDL_GetQueuedAudioSize(dev) > queue_limit) SDL_Delay(1);
+        const u32 queued_before = SDL_GetQueuedAudioSize(dev);
         cpu.call(process, {env, self, jbuffer});
         SDL_QueueAudio(dev, mem::ptr(buffer), buffer_bytes);
+        if (queued_before == 0) {
+            static u64 underruns = 0;
+            if ((++underruns & (underruns - 1)) == 0) LOGI("audio: underrun #%llu (queue ran dry)", (unsigned long long)underruns);
+        }
+        if (!g_record_path.empty()) {
+            if (!g_wav) {
+                g_wav = fopen(g_record_path.c_str(), "wb");
+                if (g_wav) wav_header(g_wav, g_sample_rate > 0 ? g_sample_rate : 24000, 0);
+            }
+            if (g_wav) {
+                fwrite(mem::ptr(buffer), 1, buffer_bytes, g_wav);
+                g_wav_bytes += buffer_bytes;
+                if ((g_wav_bytes & 0xFFFFF) < buffer_bytes) {  // refresh the header about every MB
+                    long pos = ftell(g_wav);
+                    wav_header(g_wav, g_sample_rate > 0 ? g_sample_rate : 24000, g_wav_bytes);
+                    fseek(g_wav, pos, SEEK_SET);
+                    fflush(g_wav);
+                }
+            }
+        }
     }
     if (dev) SDL_CloseAudioDevice(dev);
 }
@@ -59,6 +92,7 @@ void run() {
 }  // namespace
 
 int g_sample_rate = 48000;
+std::string g_record_path;
 
 void apply_patches() {
     // The game leaves FMOD at its Android default (24 kHz, linear resampling). Just before FMOD

@@ -50,12 +50,16 @@ steering and throttle:
 | B | Repair |
 | X | Change camera |
 | Y | Recover car |
+| Right stick | Look around. In-car view: left/right snaps to 80 degrees, pull back to look behind |
+| D-pad up | Track map on/off |
+| D-pad down | Action replay on/off |
 | LB | Pratcam on/off |
 | Start | Pause / resume |
 | Back | Android back |
 
 While a pad is connected, the game's control settings show TILT: that is how the analog input is fed in.
-Unplugging the pad restores your touch control settings.
+Unplugging the pad restores your touch control settings. The on-screen touch buttons are hidden while a pad
+is connected.
 
 ### Options
 
@@ -67,11 +71,43 @@ Unplugging the pad restores your touch control settings.
 | `--vsync` | Enable vsync (default off: unlocked frame rate in races) |
 | `--race-fps N` / `--menu-fps N` | Frame rate caps (defaults: races uncapped, menus 120) |
 | `--audio-rate N` | FMOD mix rate in Hz (default 48000; the game's original is 24000) |
+| `--pc-data DIR` | Use content from the PC Carmageddon (the folder containing `DATA`, e.g. `...\Carmageddon1\CARMA`); see below |
+| `--no-pc-data` / `--no-cockpit` | Don't use PC content / don't draw the PC cockpit |
+| `--look-invert-x` / `--look-invert-y` | Invert right-stick look-around |
 | `--censored` | Keep the Android version's pickup substitutions (see below) |
 | `--jit-opt MASK` | dynarmic JIT optimization flags (default `0`, off; `0xFFFF` loads faster but garbles some sounds) |
 | `--record-audio [FILE]` | Record the audio output to a WAV file (default `userdata\audio.wav`) |
+| `--extract-data DIR` | Unpack the APK and OBB into a folder for modding, then exit (see below) |
+| `--game-dir DIR` | Run from an unpacked folder instead of the APK and OBB |
 | `--data DIR` | Use a different user data folder |
 | `-v` / `-vv` | More logging |
+
+### Optional: PC Carmageddon content
+
+If you own the original PC Carmageddon, the port can use some of its assets for things the Android version
+lacks. Either pass `--pc-data <folder>` or put the PC game's `CARMA` folder next to `carmadroid.exe`.
+Currently this adds the **in-car cockpit** to the Android game's in-car camera: the car's dashboard with a
+working speedo, rev counter, gear display and damage lights, side views when looking around with the right
+stick, and hands that turn the wheel. Nothing from the PC game is included.
+
+### Modding: running from unpacked files
+
+`carmadroid.exe --extract-data <folder>` unpacks everything the game uses into a folder:
+
+| Folder | Contents |
+| --- | --- |
+| `lib/armeabi-v7a/` | The game's native libraries |
+| `assets/` | APK assets (the music) |
+| `DATA/` | The contents of the OBB: `CONTENT` (cars, tracks, UI, sounds, text) and `SETUP` |
+
+`carmadroid.exe --game-dir <folder>` then runs the game from that folder, with no APK or OBB needed. The game only
+reads its data from an OBB, so at startup the `DATA` folder is packed back into one (`userdata\gamedata.obb`,
+uncompressed). That only happens when files in the folder have changed, and takes a few seconds. File and
+folder names are upper-cased when packing, as in the original. The libraries must stay the 1.8.507 ones.
+
+The data formats are Stainless's own (the engine is an early version of the one used in Carmageddon:
+Reincarnation): `.CNT` (model hierarchy), `.MDL` (meshes), `.MTL` (materials), `.IMG` (textures), plus plain
+text files for car and track setup and compiled Lua (`.LOL`) for the UI.
 
 ## Differences from the original Android game
 
@@ -112,6 +148,7 @@ The output is `build/Release/carmadroid.exe` plus `SDL2.dll`. CMake downloads th
 | FMOD audio output (replaces the Java AudioTrack device) | `src/audio.cpp` |
 | Gamepad input | `src/controller.cpp` |
 | Content restoration | `src/content_patches.cpp` |
+| Unpacking and repacking the game data (Stainless WAD) | `src/gamedata.cpp` |
 | Window, rendering, frame pacing | `src/platform.cpp` |
 
 Analog steering and throttle use the game's own tilt-control code: the stick and triggers are converted into

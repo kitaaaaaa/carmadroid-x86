@@ -8,9 +8,12 @@
 #include "controller.h"
 #include "audio.h"
 #include "content_patches.h"
+#include "camera_look.h"
+#include "pc_content.h"
 #include "hle/android.h"
 #include "hle/hle_common.h"
 #include "apk.h"
+#include "gamedata.h"
 #include <windows.h>
 #include <timeapi.h>
 #include <chrono>
@@ -90,10 +93,11 @@ static fs::path find_file(const std::string& ext, const std::string& prefer) {
 // patches and hooks use fixed code offsets).
 constexpr u32 kSupportedLibCrc = 0xA6646F8D;
 
-struct ScriptedTap { double t; float x, y; bool done; int key = 0; bool pad = false; bool button = false; };
+struct ScriptedTap { double t; float x, y; bool done; int key = 0; bool pad = false; bool button = false; bool look = false; };
 
 int main(int argc, char** argv) {
     int exit_after = 0;
+    bool pc_data_off = false;
     double prof_from = 0, prof_to = 0;
     platform::Options popt;
     std::string shots_dir;
@@ -101,7 +105,7 @@ int main(int argc, char** argv) {
     float pad_steer = 0, pad_throttle = 0;
     std::vector<ScriptedTap> taps;
     bool skip_version_check = false;
-    std::string apk_arg, obb_arg;
+    std::string apk_arg, obb_arg, extract_dir, game_dir;
     hle::g_config.root = (exe_dir() / "userdata").string();
 
     for (int i = 1; i < argc; i++) {
@@ -111,12 +115,19 @@ int main(int argc, char** argv) {
         else if (a == "-q") g_log_level = 0;
         else if (a == "--apk" && i + 1 < argc) apk_arg = argv[++i];
         else if (a == "--obb" && i + 1 < argc) obb_arg = argv[++i];
+        else if (a == "--extract-data" && i + 1 < argc) extract_dir = argv[++i];
+        else if (a == "--game-dir" && i + 1 < argc) game_dir = argv[++i];
         else if ((a == "--data" || a == "--root") && i + 1 < argc) hle::g_config.root = argv[++i];
         else if (a == "--skip-version-check") skip_version_check = true;
         else if (a == "--shot-every" && i + 1 < argc) platform::g_shot_every = atoi(argv[++i]);
         else if (a == "--exit-after" && i + 1 < argc) exit_after = atoi(argv[++i]);
         else if (a == "--dump-zones") debug::g_dump_zones = true;
         else if (a == "--censored") content::g_restore = false;
+        else if (a == "--pc-data" && i + 1 < argc) pc_content::g_dir = argv[++i];
+        else if (a == "--no-pc-data") pc_data_off = true;
+        else if (a == "--no-cockpit") pc_content::g_cockpit = false;
+        else if (a == "--look-invert-x") camera_look::g_yaw_sign = -1;
+        else if (a == "--look-invert-y") camera_look::g_pitch_sign = -1;
         else if (a == "--record-audio") {  // optional file name; default userdataudio.wav
             if (i + 1 < argc && argv[i + 1][0] != '-') audio::g_record_path = argv[++i];
             else audio::g_record_path = "*default*";
@@ -151,6 +162,11 @@ int main(int argc, char** argv) {
             t.pad = true;
             if (sscanf(argv[++i], "%lf,%f,%f", &t.t, &t.x, &t.y) == 3) taps.push_back(t);
         }
+        else if (a == "--pad-look-at" && i + 1 < argc) {  // --pad-look-at seconds,x,y (right stick)
+            ScriptedTap t{};
+            t.look = true;
+            if (sscanf(argv[++i], "%lf,%f,%f", &t.t, &t.x, &t.y) == 3) taps.push_back(t);
+        }
         else if (a == "--button-at" && i + 1 < argc) {  // --button-at seconds,action
             ScriptedTap t{};
             t.button = true;
@@ -171,15 +187,39 @@ int main(int argc, char** argv) {
     // --- Game files -------------------------------------------------------------------------
     fs::path apk_path = apk_arg.empty() ? find_file(".apk", "carmageddon") : fs::path(apk_arg);
     fs::path obb_path = obb_arg.empty() ? find_file(".obb", "carmageddon") : fs::path(obb_arg);
-    if (apk_path.empty() || !fs::exists(apk_path) || obb_path.empty() || !fs::exists(obb_path)) {
+    if (!game_dir.empty()) {
+        // Run from an unpacked folder (see --extract-data): libraries and assets from the folder, and
+        // the DATA tree packed into an OBB (only repacked when files changed).
+        if (!apk::open_dir(game_dir)) {
+            error_box("Game folder not found: " + game_dir);
+            return 1;
+        }
+        std::string err;
+        const std::string packed = hle::g_config.root + "/gamedata.obb";
+        if (!gamedata::build_obb(game_dir, packed, err)) {
+            error_box("Could not pack the game data in " + game_dir + ":\n" + err);
+            return 1;
+        }
+        apk_path = fs::u8path(game_dir);
+        obb_path = fs::u8path(packed);
+    } else if (apk_path.empty() || !fs::exists(apk_path) || obb_path.empty() || !fs::exists(obb_path)) {
         error_box("Game files not found.\n\n"
                   "Put these two files next to carmadroid.exe:\n"
                   "  - the Carmageddon APK (version 1.8.507, armeabi-v7a)\n"
                   "  - main.507.com.stainlessgames.carmageddon.obb\n\n"
                   "or pass them with --apk <file> --obb <file>.");
         return 1;
-    }
-    if (!apk::open(apk_path.string())) {
+    } else if (!extract_dir.empty()) {
+        std::string err;
+        if (!gamedata::extract(apk_path.string(), obb_path.string(), extract_dir, err)) {
+            error_box("Extracting the game data failed:\n" + err);
+            return 1;
+        }
+        const std::string done = "Game data extracted to " + extract_dir + "\n\nRun it with --game-dir \"" + extract_dir + "\"";
+        fprintf(stderr, "%s\n", done.c_str());
+        if (!popt.hidden) MessageBoxA(nullptr, done.c_str(), "carmadroid-x86", MB_OK | MB_ICONINFORMATION);
+        return 0;
+    } else if (!apk::open(apk_path.string())) {
         error_box("Could not open " + apk_path.string() + " as an APK (zip) file.");
         return 1;
     }
@@ -248,6 +288,13 @@ int main(int argc, char** argv) {
     }
     controller::apply_patches();
     content::apply();
+    camera_look::apply_patches();
+    // Optional PC Carmageddon data: --pc-data DIR, or a CARMA folder (the PC game's) next to the exe.
+    if (pc_data_off) pc_content::g_dir.clear();
+    else if (pc_content::g_dir.empty())
+        for (const fs::path& dir : {exe_dir() / "CARMA", exe_dir()})
+            if (fs::exists(dir / "DATA" / "64X48X8" / "CARS")) { pc_content::g_dir = dir.string(); break; }
+    pc_content::apply_patches();
     audio::apply_patches();
     for (Module* m : {fmodex, fmodevent, parsons}) loader::run_initializers(m);
 
@@ -274,7 +321,8 @@ int main(int argc, char** argv) {
         for (auto& t : taps)
             if (!t.done && el >= t.t) {
                 t.done = true;
-                if (t.button) controller::simulate_button(t.key);
+                if (t.look) controller::simulate_look(t.x, t.y);
+                else if (t.button) controller::simulate_button(t.key);
                 else if (t.pad) controller::simulate(t.x, t.y);
                 else if (t.key) platform::inject_key(t.key);
                 else platform::inject_tap(t.x, t.y);

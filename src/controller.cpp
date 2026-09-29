@@ -17,11 +17,13 @@ constexpr u32 kSensitivity = 0x67CBC8;     // float brake (0..500), float steeri
 constexpr u32 kModeTilt = 3;               // the value Vehicle_PreDynamicsProcess treats as tilt
 constexpr u32 kCameraRollLoad = 0x578590;  // "ldr r0,[r3,#8]" feeding Camera_SetRollAngle in the tilt-steer path
 constexpr u32 kCameraStatesGot = 0x66F73C; // GOT slot -> per-player camera state (292 bytes each, mode at +0xc)
+constexpr u32 kMapShownGot = 0x670254;     // GOT slot -> float, nonzero while the track map is open
+constexpr u32 kControllerMode = 0x84A540;  // Input_GetInputGameControllerMode()
 
 enum Zone { ZONE_HANDBRAKE = 4, ZONE_DAMAGE = 7, ZONE_PRATCAM = 8, ZONE_PAUSE = 9 };
 
 // Edge-triggered actions requested by the main thread, run on the game thread.
-enum Action { ACT_REPAIR, ACT_CAMERA, ACT_RECOVER, ACT_PRATCAM, ACT_PAUSE, ACT_COUNT };
+enum Action { ACT_REPAIR, ACT_CAMERA, ACT_RECOVER, ACT_PRATCAM, ACT_PAUSE, ACT_MAP, ACT_REPLAY, ACT_COUNT };
 
 struct ButtonMap {
     SDL_GameControllerButton button;
@@ -35,6 +37,8 @@ const ButtonMap kButtons[] = {
     {SDL_CONTROLLER_BUTTON_Y, ACT_RECOVER},
     {SDL_CONTROLLER_BUTTON_LEFTSHOULDER, ACT_PRATCAM},
     {SDL_CONTROLLER_BUTTON_START, ACT_PAUSE},  // when already paused: BACK (resume)
+    {SDL_CONTROLLER_BUTTON_DPAD_UP, ACT_MAP},
+    {SDL_CONTROLLER_BUTTON_DPAD_DOWN, ACT_REPLAY},
     {SDL_CONTROLLER_BUTTON_BACK, -2},
 };
 constexpr int kNumButtons = sizeof(kButtons) / sizeof(kButtons[0]);
@@ -46,6 +50,8 @@ std::atomic<bool> g_active{false};
 std::atomic<bool> g_handbrake{false};
 std::atomic<int> g_pending[ACT_COUNT];
 std::atomic<float> g_steer{0}, g_throttle{0};
+std::atomic<float> g_look_x{0}, g_look_y{0};  // right stick, -1..1
+bool g_look_simulated = false;
 bool g_simulated = false;
 
 // Mode override bookkeeping (game thread only)
@@ -53,6 +59,7 @@ bool g_overriding = false;
 u32 g_saved_steer_mode = 0, g_saved_throttle_mode = 0;
 
 u32 g_process_touch_zones_orig = 0;  // trampoline to the original Input_ProcessTouchZones
+u32 g_touch_control_update_orig = 0;  // trampoline to the original CGameLube::TouchControlUpdate
 
 u32 lib_base() {
     static u32 base = [] {
@@ -149,12 +156,36 @@ void process_touch_zones_hook(Cpu& c) {
                                   repair_mode, f0, f1);
             if (g_pending[ACT_CAMERA].exchange(0)) { LOGI("pad: camera"); toggle_camera(c, vehicle); }
             if (g_pending[ACT_RECOVER].exchange(0)) { LOGI("pad: recover"); c.call(sym("_Z15Recover_RequestP7Vehicle"), {vehicle}); }
+            if (g_pending[ACT_MAP].exchange(0)) {
+                // Same as the keyboard map toggle in Input_CheckGlobalInputs (the swipe from the left edge).
+                const u32 shown = mem::r32(lib_base() + kMapShownGot);
+                LOGI("pad: map");
+                if (shown && mem::r32(shown) != 0) c.call(sym("_Z17Structure_HideMapv"), {});
+                else c.call(sym("_Z20Structure_DisplayMapf"), {0});
+            }
+            if (g_pending[ACT_REPLAY].exchange(0)) {
+                // Action replay (the swipe from the right edge); pressing again leaves it.
+                LOGI("pad: action replay");
+                if (c.call(sym("_Z15AR_InReplayModev"), {}) & 0xFF) c.call(sym("_Z13AR_ExitReplayv"), {});
+                else c.call(sym("_Z14AR_EnterReplayv"), {});
+            }
             if (g_pending[ACT_PAUSE].exchange(0))
                 call_zone_handler(c, "_Z15TouchZone_PauseP9TouchZonebffP10RepairModePbff", ZONE_PAUSE, bool_ptr,
                                   repair_mode, f0, f1);
         }
     }
     c.ret64(ret);
+}
+
+// The HUD shows the on-screen touch controls (e.g. the handbrake button) unless the game is in its
+// own game-controller mode. Pretend to be in that mode while the HUD updates them, when a pad drives.
+void touch_control_update_hook(Cpu& c) {
+    const u32 self = c.r(0);
+    const u32 mode_addr = lib_base() + kControllerMode;
+    const u32 saved = mem::r32(mode_addr);
+    if (g_active) mem::w32(mode_addr, 1);
+    c.call(g_touch_control_update_orig, {self});
+    mem::w32(mode_addr, saved);
 }
 
 }  // namespace
@@ -173,6 +204,8 @@ void apply_patches() {
 
     g_process_touch_zones_orig = hle::hook_function(sym("_Z23Input_ProcessTouchZonesPbP10RepairModeff"),
                                                     "Input_ProcessTouchZones", process_touch_zones_hook);
+    g_touch_control_update_orig = hle::hook_function(sym("_ZN9CGameLube18TouchControlUpdateEv"),
+                                                     "CGameLube::TouchControlUpdate", touch_control_update_hook);
 }
 
 void simulate(float steer, float throttle) {
@@ -182,6 +215,20 @@ void simulate(float steer, float throttle) {
     g_throttle = throttle;
     LOGI("controller simulation: steer %.2f throttle %.2f", steer, throttle);
 }
+
+void simulate_look(float x, float y) {
+    g_look_simulated = true;
+    g_look_x = x;
+    g_look_y = y;
+    LOGI("controller simulation: look %.2f %.2f", x, y);
+}
+
+void look_input(float& x, float& y) {
+    x = g_look_x;
+    y = g_look_y;
+}
+
+float steer_input() { return g_steer; }
 
 void simulate_button(int action) {
     if (action < 0) g_handbrake = !g_handbrake;
@@ -227,6 +274,10 @@ void update() {
     g_steer = steer;
     g_throttle = throttle;
     feed_accelerometer(steer, throttle);
+    if (!g_look_simulated) {
+        g_look_x = deadzone(axis(SDL_CONTROLLER_AXIS_RIGHTX), 0.15f);
+        g_look_y = deadzone(axis(SDL_CONTROLLER_AXIS_RIGHTY), 0.15f);
+    }
 
     bool handbrake = false;
     for (int i = 0; i < kNumButtons; i++) {

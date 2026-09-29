@@ -95,9 +95,25 @@ u32 add_dynamic(const std::string& name, HleFn fn) { return add_entry(name, std:
 
 u32 hook_function(u32 addr, const std::string& name, HleFn fn) {
     if (addr & 1) fatal("hook_function: %s is Thumb code (unsupported)", name.c_str());
-    u32 tramp = mem::malloc(16);
-    mem::w32(tramp + 0, mem::r32(addr));
-    mem::w32(tramp + 4, mem::r32(addr + 4));
+    // Trampoline: [ins0][ins1][ldr pc,[pc,#-4]][addr+8][literal0][literal1]
+    // PC-relative literal loads ("ldr rd, [pc, #imm]") among the relocated instructions are rewritten
+    // to load the same value from a literal slot in the trampoline.
+    u32 tramp = mem::malloc(24);
+    for (int k = 0; k < 2; k++) {
+        u32 ins = mem::r32(addr + k * 4);
+        if ((ins & 0x0F7F0000) == 0x051F0000) {  // LDR (literal), immediate offset
+            const u32 imm = ins & 0xFFF;
+            const u32 src = (ins & (1u << 23)) ? addr + k * 4 + 8 + imm : addr + k * 4 + 8 - imm;
+            const u32 slot = tramp + 16 + k * 4;
+            mem::w32(slot, mem::r32(src));
+            ins = (ins & 0xFFFFF000) | (1u << 23) | (slot - (tramp + k * 4 + 8));
+        } else if (((ins >> 16) & 0xF) == 15 && ((ins >> 26) & 3) != 2) {
+            // other PC-relative data-processing/load forms are not supported
+            if ((ins & 0x0E000000) == 0x00000000 || (ins & 0x0C000000) == 0x04000000)
+                fatal("hook_function: %s starts with an unsupported PC-relative instruction 0x%08x", name.c_str(), ins);
+        }
+        mem::w32(tramp + k * 4, ins);
+    }
     mem::w32(tramp + 8, 0xE51FF004);  // ldr pc, [pc, #-4]
     mem::w32(tramp + 12, addr + 8);
     u32 thunk = add_entry("hook:" + name, std::move(fn), true);

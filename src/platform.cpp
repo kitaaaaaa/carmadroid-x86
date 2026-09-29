@@ -228,6 +228,7 @@ static std::atomic<u64> g_last_race_frame_ms{0};
 static u64 now_ms() { return SDL_GetTicks64(); }
 
 void note_race_frame() { g_last_race_frame_ms = now_ms(); }
+bool in_race() { return now_ms() - g_last_race_frame_ms < 250; }
 
 static void limit_frame_rate() {
     static u64 next_us = 0;

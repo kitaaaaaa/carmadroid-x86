@@ -17,7 +17,13 @@ void on_game_frame(Cpu& c);              // game thread, every frame (eglSwapBuf
 
 // Debug: pretend a pad is connected with fixed stick/trigger values.
 void simulate(float steer, float throttle);
-// Debug: trigger an action (-1 toggles handbrake, 0 repair, 1 camera, 2 recover, 3 pratcam, 4 pause).
+// Debug: trigger an action (-1 toggles handbrake, 0 repair, 1 camera, 2 recover, 3 pratcam, 4 pause, 5 map, 6 replay).
 void simulate_button(int action);
+// Debug: pretend the right stick is held at (x, y).
+void simulate_look(float x, float y);
+
+// Right stick (-1..1; x right, y down) and current steering (-1..1), for the camera/cockpit code.
+void look_input(float& x, float& y);
+float steer_input();
 
 }  // namespace controller

@@ -22,6 +22,7 @@ bool init(const Options& opt);
 // Called from the game's per-frame race input routine. Outside races (menus, loading screens)
 // presentation is capped at menu_fps so the game thread spends its time loading instead of drawing.
 void note_race_frame();
+bool in_race();  // a race frame ran in the last 250 ms
 extern int g_menu_fps;   // 0 = uncapped
 extern int g_race_fps;   // 0 = uncapped
 void make_current(bool current);  // on the calling thread

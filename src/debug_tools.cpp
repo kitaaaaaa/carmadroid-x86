@@ -49,6 +49,45 @@ static void dump_wads(Cpu& c) {
 
 bool g_dump_zones = false;
 
+static void dump_camera() {
+    const u32 lib = 0x10000000;
+    const u32 veh = mem::r32(lib + 0x8C1FAC);
+    const u32 cams = mem::r32(lib + 0x66F73C);
+    if (!veh || !cams) { LOGI("camdump: no vehicle/camera yet"); return; }
+    std::string line;
+    char b[32];
+    for (int k = 0; k < 73; k++) {
+        u32 v = mem::r32(cams + k * 4);
+        float f;
+        memcpy(&f, &v, 4);
+        if (v == 0) snprintf(b, sizeof b, "[%d]0 ", k);
+        else if (f > -100000 && f < 100000 && (v & 0x7f800000) && (v & 0x7f800000) != 0x7f800000) snprintf(b, sizeof b, "[%d]%.3f ", k, f);
+        else snprintf(b, sizeof b, "[%d]%08x ", k, v);
+        line += b;
+    }
+    LOGI("camdump cam0: %s", line.c_str());
+    for (int k : {0, 1, 2, 4, 34}) {
+        u32 ptr = mem::r32(cams + k * 4);
+        if (!mem::valid(ptr + 8, 48)) { LOGI("camdump [%d]=0x%08x (not a pointer)", k, ptr); continue; }
+        const float* m = mem::ptr<const float>(ptr + 8);
+        LOGI("camdump [%d]=0x%08x M34: %.3f %.3f %.3f | %.3f %.3f %.3f | %.3f %.3f %.3f | pos %.2f %.2f %.2f", k, ptr,
+             m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
+    }
+    // car name: scan the vehicle record and the objects it points to for ASCII names
+    for (u32 off = 0; off < 0x800; off += 4) {
+        u32 p = mem::r32(veh + off);
+        const char* cand[2] = {mem::valid(veh + off, 16) ? mem::ptr<const char>(veh + off) : nullptr,
+                               mem::valid(p, 16) ? mem::ptr<const char>(p) : nullptr};
+        for (int k = 0; k < 2; k++) {
+            const char* s = cand[k];
+            if (!s) continue;
+            int n = 0;
+            while (n < 24 && s[n] >= 0x20 && s[n] < 0x7f) n++;
+            if (n >= 4 && s[n] == 0) LOGI("camdump veh+0x%x%s: \"%s\"", off, k ? " ->" : "", s);
+        }
+    }
+}
+
 static void dump_zones(Cpu& c) {
     const u32 input = 0x1084A53C;
     LOGI("race state: localHuman=0x%x gPaused=%u", mem::r32(0x108C1FAC), mem::r8(loader::find_symbol("gPaused")));
@@ -110,6 +149,7 @@ void on_frame(Cpu& c) {
     static int frame = 0;
     frame++;
     if (g_dump_zones && frame % 300 == 0) dump_zones(c);
+    if (g_dump_zones && frame % 60 == 0) dump_camera();
     if (!g_dump_file.empty() && frame == 300) {
         std::string all = g_dump_file;  // comma-separated list
         size_t p = 0;

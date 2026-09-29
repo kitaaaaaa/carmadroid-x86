@@ -1,7 +1,9 @@
 # carmadroid-x86
 
 Runs the **Android version of Carmageddon** (Stainless Games, 2013, v1.8.507) natively on 64-bit Windows,
-with analog gamepad support, up to 1080p rendering, an unlocked frame rate and restored content.
+with analog gamepad support, up to 1080p rendering, an unlocked frame rate and restored content. It can
+also use the original PC Carmageddon's cockpit graphics for the in-car view, and unpack the game data for
+modding.
 
 The Android release is a 32-bit ARM-only app that no longer runs on modern 64-bit-only phones. This project
 loads the game's original ARM libraries from the APK, runs them through an ARM-to-x86-64 JIT, and replaces
@@ -24,6 +26,16 @@ startup and other versions are rejected (`--skip-version-check` overrides this, 
 
 Prebuilt Windows builds are on the [Releases page](https://github.com/kitaaaaaa/carmadroid-x86/releases).
 Every push to `main` is also built automatically (see the Actions tab for the latest build artifact).
+
+### What's new in 0.2.0
+
+- **Look around with the right stick.** In the in-car view it snaps to 80 degrees left or right, and pulling
+  back looks behind you.
+- **PC cockpit (optional).** With a copy of the PC game, the in-car view gets the original dashboard, with a
+  working speedo, rev counter, gear display and damage lights, and hands that turn the wheel.
+- **Map and action replay on the D-pad** (up and down), instead of swiping from the screen edges.
+- **On-screen touch buttons are hidden** while a pad is connected.
+- **Modding:** `--extract-data` unpacks the game data into a folder, and `--game-dir` runs from it.
 
 ## Running
 
@@ -58,6 +70,7 @@ steering and throttle:
 | Back | Android back |
 
 While a pad is connected, the game's control settings show TILT: that is how the analog input is fed in.
+If looking around goes the wrong way, use `--look-invert-x` / `--look-invert-y`.
 Unplugging the pad restores your touch control settings. The on-screen touch buttons are hidden while a pad
 is connected.
 
@@ -74,6 +87,7 @@ is connected.
 | `--pc-data DIR` | Use content from the PC Carmageddon (the folder containing `DATA`, e.g. `...\Carmageddon1\CARMA`); see below |
 | `--no-pc-data` / `--no-cockpit` | Don't use PC content / don't draw the PC cockpit |
 | `--look-invert-x` / `--look-invert-y` | Invert right-stick look-around |
+| `--unlock-all-cars` | Unlock every car (the game's own cheat; not saved) |
 | `--censored` | Keep the Android version's pickup substitutions (see below) |
 | `--jit-opt MASK` | dynarmic JIT optimization flags (default `0`, off; `0xFFFF` loads faster but garbles some sounds) |
 | `--record-audio [FILE]` | Record the audio output to a WAV file (default `userdata\audio.wav`) |
@@ -88,7 +102,11 @@ If you own the original PC Carmageddon, the port can use some of its assets for 
 lacks. Either pass `--pc-data <folder>` or put the PC game's `CARMA` folder next to `carmadroid.exe`.
 Currently this adds the **in-car cockpit** to the Android game's in-car camera: the car's dashboard with a
 working speedo, rev counter, gear display and damage lights, side views when looking around with the right
-stick, and hands that turn the wheel. Nothing from the PC game is included.
+stick, and hands that turn the wheel. While the dashboard is shown, the HUD's own damage graph and speedo are
+hidden, since the dashboard shows them. As in the PC game, a damage light only comes on once that part is more
+than 20% damaged. Cars that don't exist in the PC game keep the normal Android view.
+
+Without the PC files, the in-car view is exactly as in the Android game. Nothing from the PC game is included.
 
 ### Modding: running from unpacked files
 
@@ -111,12 +129,16 @@ text files for car and track setup and compiled Lua (`.LOL`) for the UI.
 
 ## Differences from the original Android game
 
-- **Gamepad support** in races (the Android game only has touch and tilt controls).
+- **Gamepad support** in races (the Android game only has touch and tilt controls), including looking
+  around with the right stick.
+- **PC cockpit** in the in-car view, if you have the PC game (optional).
 - **Resolution**: renders up to 1920x1080 off-screen and scales to any window size.
 - **Frame rate**: unlocked in races.
 - **Audio**: mixed at 48 kHz with spline resampling instead of 24 kHz linear.
 - **Restored pickups**: the Android build silently swaps three pickup types for others
   (including *Drugs!!!*, which becomes Grip-o-matic tyres). This is undone unless `--censored` is given.
+- **Modding**: the game can be run from unpacked, editable files, and the car roster limit is raised from
+  40 to 64 (`tools/pc2android` converts PC Carmageddon cars).
 - Online features (store, Facebook, ads, analytics) are disabled.
 
 ## Building
@@ -133,7 +155,7 @@ The output is `build/Release/carmadroid.exe` plus `SDL2.dll`. CMake downloads th
 - [dynarmic](https://github.com/lioncash/dynarmic), ARM to x86-64 JIT (0BSD), built from source (A32 frontend only)
 - [Boost](https://www.boost.org/) 1.86 headers, needed by dynarmic (Boost Software License)
 - [SDL2](https://github.com/libsdl-org/SDL) 2.32.10, window, OpenGL, audio and gamepads (zlib license), prebuilt
-- [miniz](https://github.com/richgel999/miniz), APK (zip) reading (MIT), vendored in `third_party/`
+- [miniz](https://github.com/richgel999/miniz), APK (zip) and WAD reading (MIT), vendored in `third_party/`
 
 ## How it works
 
@@ -147,13 +169,16 @@ The output is `build/Release/carmadroid.exe` plus `SDL2.dll`. CMake downloads th
 | OpenGL ES 1.1 to desktop OpenGL, EGL | `src/hle/gles.cpp`, `src/hle/egl.cpp` |
 | FMOD audio output (replaces the Java AudioTrack device) | `src/audio.cpp` |
 | Gamepad input | `src/controller.cpp` |
+| Right-stick look-around | `src/camera_look.cpp` |
+| PC cockpit overlay (reads the PC game's PIX images and car files) | `src/pc_content.cpp` |
 | Content restoration | `src/content_patches.cpp` |
 | Unpacking and repacking the game data (Stainless WAD) | `src/gamedata.cpp` |
+| Car roster limit (40 to 64) | `src/roster.cpp` |
 | Window, rendering, frame pacing | `src/platform.cpp` |
 
 Analog steering and throttle use the game's own tilt-control code: the stick and triggers are converted into
 the exact accelerometer vector that produces the wanted steering and throttle values. The pad buttons call
-the game's own handbrake, repair, camera, recover, pratcam and pause functions directly.
+the game's own handbrake, repair, camera, recover, pratcam, pause, map and action replay functions directly.
 
 ## Legal
 

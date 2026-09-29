@@ -2,6 +2,7 @@
 #include "../platform.h"
 #include "../debug_tools.h"
 #include "../controller.h"
+#include "../content_patches.h"
 #include "android.h"
 #include "hle_common.h"
 
@@ -78,6 +79,7 @@ HLE(eglQuerySurface) {
 HLE(eglSwapBuffers) {
     debug::on_frame(c);
     controller::on_game_frame(c);
+    content::on_game_frame();
     platform::swap();
     c.ret(1);
 }

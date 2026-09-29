@@ -8,6 +8,7 @@
 #include "controller.h"
 #include "audio.h"
 #include "content_patches.h"
+#include "roster.h"
 #include "camera_look.h"
 #include "pc_content.h"
 #include "hle/android.h"
@@ -123,6 +124,8 @@ int main(int argc, char** argv) {
         else if (a == "--exit-after" && i + 1 < argc) exit_after = atoi(argv[++i]);
         else if (a == "--dump-zones") debug::g_dump_zones = true;
         else if (a == "--censored") content::g_restore = false;
+        else if (a == "--unlock-all-cars") content::g_unlock_all_cars = true;
+        else if (a == "--car" && i + 1 < argc) content::g_force_car = argv[++i];
         else if (a == "--pc-data" && i + 1 < argc) pc_content::g_dir = argv[++i];
         else if (a == "--no-pc-data") pc_data_off = true;
         else if (a == "--no-cockpit") pc_content::g_cockpit = false;
@@ -288,6 +291,7 @@ int main(int argc, char** argv) {
     }
     controller::apply_patches();
     content::apply();
+    roster::apply();
     camera_look::apply_patches();
     // Optional PC Carmageddon data: --pc-data DIR, or a CARMA folder (the PC game's) next to the exe.
     if (pc_data_off) pc_content::g_dir.clear();

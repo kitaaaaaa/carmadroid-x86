@@ -6,6 +6,19 @@
 namespace content {
 
 bool g_restore = true;
+bool g_unlock_all_cars = false;
+std::string g_force_car;
+
+namespace {
+// Structure_CheatUnlockAllCars() sets this byte; Structure_IsCarUnlocked() then reports every car as
+// owned. It is not saved, so it is simply kept set.
+constexpr u32 kUnlockAllCarsFlag = 0x8BD9B6;
+constexpr u32 kCarFileNamesGot = 0x67015c;  // -> char* per quick-race car
+constexpr u32 kNumQuickCars = 0x84414c;
+constexpr u32 kSaveSlotPtrGot = 0x67054c;   // -> pointer to the current save slot
+constexpr u32 kSlotSelectedCar = 0x78;      // index into the quick-race car list
+u32 g_lib = 0;
+}  // namespace
 
 void apply() {
     if (!g_restore) return;
@@ -31,5 +44,36 @@ void apply() {
     }
     LOGI("content: restored %d censored pickup(s) (Drugs and friends)", patched);
 }
+
+static void force_car();
+
+void on_game_frame() {
+    if (!g_unlock_all_cars && g_force_car.empty()) return;
+    if (!g_lib)
+        for (Module* m : loader::modules())
+            if (m->name == "libParsons.so") g_lib = m->base;
+    if (!g_lib) return;
+    if (!g_force_car.empty()) force_car();
+    if (g_unlock_all_cars) mem::w8(g_lib + kUnlockAllCarsFlag, 1);
+}
+
+// --car: once the car list is loaded, make NAME the selected car in the current save slot.
+static void force_car() {
+    const int n = (int)mem::r32(g_lib + kNumQuickCars);
+    const u32 holder = mem::r32(g_lib + kSaveSlotPtrGot);
+    const u32 slot = holder ? mem::r32(holder) : 0;
+    const u32 names = mem::r32(g_lib + kCarFileNamesGot);
+    if (n <= 0 || !slot || !names) return;
+    for (int i = 0; i < n; i++) {
+        const char* s = mem::str(mem::r32(names + i * 4));
+        if (s && _stricmp(s, g_force_car.c_str()) == 0) {
+            mem::w32(slot + kSlotSelectedCar, (u32)i);
+            LOGI("content: selected car %s (#%d)", s, i);
+            g_force_car.clear();
+            return;
+        }
+    }
+}
+
 
 }  // namespace content

@@ -1,6 +1,7 @@
 // pthreads + semaphores. Guest sync objects are small integers in guest memory;
 // we key host objects by their guest address.
 #include "hle_common.h"
+#include "../elf_loader.h"
 #include <windows.h>
 #include <atomic>
 #include <chrono>
@@ -270,7 +271,11 @@ HLE(pthread_create) {
     mem::w32(out, ti->id);
     LOGI("pthread_create: thread %u -> %s", ti->id, symbolize(fn).c_str());
     ti->t = std::thread([ti, fn, arg, stack] {
-        Cpu cpu(ti->id, stack);
+        // Threads started by FMOD (its mixer/stream threads) get the audio-safe JIT settings.
+        Module* m = loader::module_at(fn);
+        const bool audio = m && m->name.rfind("libfmod", 0) == 0;
+        if (audio) LOGI("thread %u is an FMOD thread (audio JIT settings)", ti->id);
+        Cpu cpu(ti->id, stack, audio);
         Cpu::current = &cpu;
         u32 r = cpu.call(fn, {arg});
         ti->result = cpu.exiting ? cpu.exit_value : r;

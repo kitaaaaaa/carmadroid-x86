@@ -173,6 +173,11 @@ u64 RegArgs::u64v() {
 // ===========================================================================
 thread_local Cpu* Cpu::current = nullptr;
 
+u32 g_jit_optimizations = 0x0000FFFF;        // all safe optimizations; --jit-opt overrides
+// JIT optimizations for FMOD's threads (mixer/streams); same as everything else unless
+// --jit-opt-audio overrides it (kept as a diagnostic switch).
+u32 g_jit_optimizations_audio = 0x0000FFFF;
+
 namespace profiler {
 bool g_enabled = false;
 std::atomic<bool> g_active{false};
@@ -229,9 +234,15 @@ struct Cpu::Backend final : Dynarmic::A32::UserCallbacks {
         cfg.page_table = g_page_table;
         cfg.processor_id = g_next_processor++ % kMaxProcessors;
         cfg.global_monitor = g_monitor;
-        cfg.enable_cycle_counting = false;
+        // Must stay enabled: with cycle counting off, dynarmic (x64 backend) switches MXCSR to the
+        // host value when calling CallSVC/ExceptionRaised but never switches it back, so guest
+        // floating-point code after any HLE call runs without flush-to-zero once blocks are linked.
+        // That corrupted FMOD's DSP state (beeping, warbling audio). The tick budget is unlimited.
+        cfg.enable_cycle_counting = true;
         cfg.code_cache_size = code_cache;
         cfg.define_unpredictable_behaviour = true;
+        cfg.optimizations = static_cast<Dynarmic::OptimizationFlag>(
+            c.audio_thread ? g_jit_optimizations_audio : g_jit_optimizations);
         jit = std::make_unique<Dynarmic::A32::Jit>(cfg);
         jit->SetCpsr(0x10);  // user mode, ARM
     }
@@ -294,6 +305,7 @@ struct Cpu::Backend final : Dynarmic::A32::UserCallbacks {
     void CallSVC(std::uint32_t) override {
         const u32 svc_addr = jit->Regs()[15] - 4;
         if (svc_addr == hle::RET_MAGIC) {  // a host->guest call returned
+            returned = true;
             jit->HaltExecution();
             return;
         }
@@ -305,7 +317,8 @@ struct Cpu::Backend final : Dynarmic::A32::UserCallbacks {
         if (cpu.exiting) jit->HaltExecution();
     }
     void AddTicks(std::uint64_t) override {}
-    std::uint64_t GetTicksRemaining() override { return 1000000; }
+    std::uint64_t GetTicksRemaining() override { return 1ull << 40; }
+    bool returned = false;  // set when the current host->guest call reaches RET_MAGIC
 };
 
 Cpu::Backend& Cpu::level(int i) {
@@ -316,7 +329,7 @@ Cpu::Backend& Cpu::level(int i) {
     return *levels[i];
 }
 
-Cpu::Cpu(u32 tid, u32 stack_size) : thread_id(tid) {
+Cpu::Cpu(u32 tid, u32 stack_size, bool audio) : thread_id(tid), audio_thread(audio) {
     init_globals();
     active = &level(0);
     stack_top = mem::alloc_stack(stack_size);
@@ -380,7 +393,10 @@ u64 Cpu::call64(u32 fn, std::initializer_list<u32> args) {
 
     active = &b;
     depth++;
-    b.jit->Run();
+    b.returned = false;
+    do {
+        b.jit->Run();  // may also return when the tick budget runs out; then just continue
+    } while (!b.returned && !exiting);
     b.jit->ClearHalt(Dynarmic::HaltReason::UserDefined1);
     depth--;
     u64 result = regs[0] | ((u64)regs[1] << 32);

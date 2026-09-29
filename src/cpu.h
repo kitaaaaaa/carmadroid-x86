@@ -102,7 +102,9 @@ struct Cpu {
 
     static thread_local Cpu* current;
 
-    Cpu(u32 tid, u32 stack_size);
+    // audio: the thread runs FMOD mixing code (uses g_jit_optimizations_audio).
+    Cpu(u32 tid, u32 stack_size, bool audio = false);
+    bool audio_thread = false;
     ~Cpu();
 
     u32 r(int n);
@@ -145,6 +147,10 @@ extern bool g_enabled;
 extern std::atomic<bool> g_active;
 void report();
 }
+
+// dynarmic optimization flags (bitmask of Dynarmic::OptimizationFlag); set before any Cpu is created.
+extern u32 g_jit_optimizations;
+extern u32 g_jit_optimizations_audio;  // for the FMOD mixing thread
 
 // Symbolizer hook (implemented by the ELF loader)
 std::string symbolize(u32 addr);

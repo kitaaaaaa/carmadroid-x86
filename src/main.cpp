@@ -117,6 +117,8 @@ int main(int argc, char** argv) {
         else if (a == "--exit-after" && i + 1 < argc) exit_after = atoi(argv[++i]);
         else if (a == "--dump-zones") debug::g_dump_zones = true;
         else if (a == "--censored") content::g_restore = false;
+        else if (a == "--jit-opt" && i + 1 < argc) g_jit_optimizations = (u32)strtoul(argv[++i], nullptr, 0);
+        else if (a == "--jit-opt-audio" && i + 1 < argc) g_jit_optimizations_audio = (u32)strtoul(argv[++i], nullptr, 0);
         else if (a == "--audio-rate" && i + 1 < argc) audio::g_sample_rate = atoi(argv[++i]);
         else if (a == "--dump-file" && i + 1 < argc) debug::g_dump_file = argv[++i];
         else if (a == "--fullscreen") popt.fullscreen = true;

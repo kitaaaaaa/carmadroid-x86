@@ -7,12 +7,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 import c1text, carconv, addcar, uiimg, damagehud
 
 # Splat Pack cars that are not in the Android game, with display names
-CARS = {
-    '333': '333', 'BUGGIT': 'BUGGIT', 'DOOZER': 'DOOZER', 'JAQUES': 'JAQUES', 'JEEPY': 'JEEPY',
-    'MONSTER': 'MONSTER', 'MUSCLE': 'MUSCLE', 'NEWANNIE': 'NEW ANNIE', 'NEWEAGLE': 'NEW EAGLE',
-    'PARAMED': 'PARAMED', 'PORK': 'PORK', 'ROADHOG': 'ROADHOG', 'SEMI': 'SEMI', 'SLED': 'SLED',
-    'SPAGHETI': 'SPAGHETTI', 'SUBFRAME': 'SUBFRAME', 'TOOHORSE': 'TWO HORSE', 'V6SHAME': 'V6 SHAME',
-    'VLAD2': 'VLAD 2',
+CARS = {  # display names from the CWA wiki's list of Carmageddon vehicles (matched by driver)
+    '333': "FEARARI F999", 'BUGGIT': 'BUGUTTI', 'DOOZER': 'DOOZER', 'JAQUES': "DE GORY'UN",
+    'JEEPY': 'RAMRAIDER', 'MONSTER': 'MONSTER MASHER', 'MUSCLE': 'STODGE BARGER', 'NEWANNIE': 'HAWK II',
+    'NEWEAGLE': 'EAGLE II', 'PARAMED': 'BLOOD MOBILE', 'PORK': 'CARRERASAUR', 'ROADHOG': 'ROADHOG',
+    'SEMI': "RIG O'MORTIS", 'SLED': 'THE SLED', 'SPAGHETI': 'STILETTO', 'SUBFRAME': 'KILLER COOP',
+    'TOOHORSE': 'PIECE MAKER', 'V6SHAME': 'KILLER KITTY', 'VLAD2': 'ANNIHILATOR II',
 }
 
 

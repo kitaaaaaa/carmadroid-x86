@@ -1,6 +1,7 @@
 // Optional PC Carmageddon content. The Android version has no cockpit graphics for the in-car view;
 // the PC version's 640x480 cockpit images (DATA/64X48X8) are drawn over it here.
 #include "pc_content.h"
+#include "pcimport/formats.h"
 #include "camera_look.h"
 #include "controller.h"
 #include "cpu.h"
@@ -17,11 +18,13 @@
 #include <map>
 #include <memory>
 #include <sstream>
+#include <filesystem>
 #include <vector>
 
 namespace pc_content {
 
 std::string g_dir;
+std::string g_splat_dir;
 bool g_cockpit = true;
 
 namespace {
@@ -85,7 +88,15 @@ struct Cockpit {
 std::map<std::string, std::shared_ptr<Image>> g_images;
 std::map<std::string, std::unique_ptr<Cockpit>> g_cockpits;  // by car name (null = none available)
 
-std::string data_path(const std::string& rel) { return g_dir + "/DATA/" + rel; }
+// A file under DATA: from the base game, else from the Splat Pack.
+std::string data_path(const std::string& rel) {
+    const std::string base = g_dir + "/DATA/" + rel;
+    if (!g_splat_dir.empty() && !std::filesystem::exists(std::filesystem::path(base))) {
+        const std::string splat = g_splat_dir + "/DATA/" + rel;
+        if (std::filesystem::exists(std::filesystem::path(splat))) return splat;
+    }
+    return base;
+}
 
 bool read_file(const std::string& path, std::vector<u8>& out) {
     std::ifstream f(path, std::ios::binary);
@@ -169,12 +180,14 @@ std::shared_ptr<Image> image(const std::string& name) {
     return img;
 }
 
-// Non-empty lines of a PC data text file with // comments removed.
+// Non-empty lines of a PC data text file with // comments removed ('@' lines are encrypted).
 std::vector<std::string> text_lines(const std::string& path) {
     std::vector<std::string> lines;
-    std::ifstream f(path);
+    std::ifstream f(path, std::ios::binary);
     std::string s;
     while (std::getline(f, s)) {
+        while (!s.empty() && s.back() == '\r') s.pop_back();
+        s = pcimport::c1_decode_line(s);
         if (size_t c = s.find("//"); c != std::string::npos) s.resize(c);
         while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r')) s.pop_back();
         size_t b = s.find_first_not_of(" \t");
@@ -224,7 +237,10 @@ Gauge parse_gauge(const std::string& line) {
 // DATA/64X48X8/CARS/<car>.TXT: forward/left/right images (each followed by a rectangle),
 // speedo/tacho/gear lines, then the hands frame count and one line per frame.
 std::unique_ptr<Cockpit> load_cockpit(const std::string& car) {
-    const auto lines = text_lines(data_path("64X48X8/CARS/" + car + ".TXT"));
+    auto lines = text_lines(data_path("64X48X8/CARS/" + car + ".TXT"));
+    // Converted cars whose PC name starts with a digit are called Car<name> (CAR333: the PC's 333).
+    if (lines.empty() && car.size() > 3 && car.compare(0, 3, "CAR") == 0 && isdigit((unsigned char)car[3]))
+        lines = text_lines(data_path("64X48X8/CARS/" + car.substr(3) + ".TXT"));
     if (lines.size() < 7) {
         LOGI("pc: no PC cockpit for car %s", car.c_str());
         return nullptr;

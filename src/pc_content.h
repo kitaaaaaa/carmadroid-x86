@@ -8,6 +8,8 @@ namespace pc_content {
 
 // Directory containing the PC game's DATA folder (e.g. ...\Carmageddon1\CARMA). Empty = off.
 extern std::string g_dir;
+// The Splat Pack's folder (...\Carmageddon1\CARSPLAT), for its cars' cockpits. Optional.
+extern std::string g_splat_dir;
 extern bool g_cockpit;  // draw the cockpit overlay in the in-car view
 
 void apply_patches();   // after libParsons.so is loaded

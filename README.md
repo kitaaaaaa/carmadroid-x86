@@ -27,6 +27,16 @@ startup and other versions are rejected (`--skip-version-check` overrides this, 
 Prebuilt Windows builds are on the [Releases page](https://github.com/kitaaaaaa/carmadroid-x86/releases).
 Every push to `main` is also built automatically (see the Actions tab for the latest build artifact).
 
+### What's new in 0.3.0
+
+- **Splat Pack cars (optional).** With the PC game's `CARMA` and `CARSPLAT` folders, the game converts the
+  18 Splat Pack cars the Android version lacks and adds them to the car list and the opponents, with menu
+  pictures, grid pictures, driver portraits, damage HUD, descriptions and their own cockpits. It needs the
+  unpacked game data: run `carmadroid.exe --extract-data` once (see below).
+- **Up to 64 cars** in the roster (the game's limit was 40).
+- **Unpacked game data is used automatically** from the `gamedata` folder next to the exe.
+- **Mouse drags** no longer pile up touch events, for drag scrolling on the car select screen.
+
 ### What's new in 0.2.0
 
 - **Look around with the right stick.** In the in-car view it snaps to 80 degrees left or right, and pulling
@@ -85,13 +95,14 @@ is connected.
 | `--race-fps N` / `--menu-fps N` | Frame rate caps (defaults: races uncapped, menus 120) |
 | `--audio-rate N` | FMOD mix rate in Hz (default 48000; the game's original is 24000) |
 | `--pc-data DIR` | Use content from the PC Carmageddon (the folder containing `DATA`, e.g. `...\Carmageddon1\CARMA`); see below |
+| `--splat-data DIR` | The PC Splat Pack's folder (e.g. `...\Carmageddon1\CARSPLAT`), if it isn't next to `CARMA` or the exe |
 | `--no-pc-data` / `--no-cockpit` | Don't use PC content / don't draw the PC cockpit |
 | `--look-invert-x` / `--look-invert-y` | Invert right-stick look-around |
 | `--unlock-all-cars` | Unlock every car (the game's own cheat; not saved) |
 | `--censored` | Keep the Android version's pickup substitutions (see below) |
 | `--jit-opt MASK` | dynarmic JIT optimization flags (default `0`, off; `0xFFFF` loads faster but garbles some sounds) |
 | `--record-audio [FILE]` | Record the audio output to a WAV file (default `userdata\audio.wav`) |
-| `--extract-data DIR` | Unpack the APK and OBB into a folder for modding, then exit (see below) |
+| `--extract-data [DIR]` | Unpack the APK and OBB into a folder (default: `gamedata` next to the exe), then exit (see below) |
 | `--game-dir DIR` | Run from an unpacked folder instead of the APK and OBB |
 | `--data DIR` | Use a different user data folder |
 | `-v` / `-vv` | More logging |
@@ -106,11 +117,21 @@ stick, and hands that turn the wheel. While the dashboard is shown, the HUD's ow
 hidden, since the dashboard shows them. As in the PC game, a damage light only comes on once that part is more
 than 20% damaged. Cars that don't exist in the PC game keep the normal Android view.
 
-Without the PC files, the in-car view is exactly as in the Android game. Nothing from the PC game is included.
+With the **Splat Pack** too (the PC game's `CARSPLAT` folder, next to `CARMA` or to `carmadroid.exe`), its
+cars get their cockpits as well, and the game can add the Splat Pack cars themselves (this needs the unpacked
+game data, see below). Run `carmadroid.exe --extract-data` once. On the next start, the game converts the 18
+Splat Pack cars the Android version lacks and adds them to the car list and to the opponents, with their
+menu pictures, pre-race grid pictures, driver portraits, damage HUD and descriptions. This takes under a
+minute, only happens once, and is redone by itself when the converter changes in a new version. The Monster
+Masher is left out for now: its huge wheels don't work with the Android physics. PC tracks are not converted
+yet.
+
+Without the PC files, everything is exactly as in the Android game. Nothing from the PC game is included.
 
 ### Modding: running from unpacked files
 
-`carmadroid.exe --extract-data <folder>` unpacks everything the game uses into a folder:
+`carmadroid.exe --extract-data` unpacks everything the game uses into the `gamedata` folder next to the exe
+(or `--extract-data <folder>` into another folder):
 
 | Folder | Contents |
 | --- | --- |
@@ -118,7 +139,8 @@ Without the PC files, the in-car view is exactly as in the Android game. Nothing
 | `assets/` | APK assets (the music) |
 | `DATA/` | The contents of the OBB: `CONTENT` (cars, tracks, UI, sounds, text) and `SETUP` |
 
-`carmadroid.exe --game-dir <folder>` then runs the game from that folder, with no APK or OBB needed. The game only
+From then on the game runs from `gamedata` by itself, with no APK or OBB needed (delete the folder to go back
+to them). A folder elsewhere is used with `carmadroid.exe --game-dir <folder>`. The game only
 reads its data from an OBB, so at startup the `DATA` folder is packed back into one (`userdata\gamedata.obb`,
 uncompressed). That only happens when files in the folder have changed, and takes a few seconds. File and
 folder names are upper-cased when packing, as in the original. The libraries must stay the 1.8.507 ones.
@@ -126,6 +148,11 @@ folder names are upper-cased when packing, as in the original. The libraries mus
 The data formats are Stainless's own (the engine is an early version of the one used in Carmageddon:
 Reincarnation): `.CNT` (model hierarchy), `.MDL` (meshes), `.MTL` (materials), `.IMG` (textures), plus plain
 text files for car and track setup and compiled Lua (`.LOL`) for the UI.
+
+When the game installs PC content into the folder, it keeps a list of the files it added and backups of the
+game files it changed in `gamedata\pcimport`, so it can undo and redo the install. Unpacking again with
+`--extract-data` removes it first. The converter's Python original, handy for experiments, is in
+`tools/pc2android`.
 
 ## Differences from the original Android game
 

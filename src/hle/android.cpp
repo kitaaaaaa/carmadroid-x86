@@ -70,6 +70,23 @@ u32 input_queue_handle() {
 }
 
 void push_input(const InputEvent& e) {
+    {
+        // Like Android's input batching: a touch move replaces a move that is still waiting in the queue
+        // (same pointers), so a mouse reporting ~1000 moves/s cannot flood the game, which handles a
+        // limited number of events per frame (drags would otherwise lag by seconds).
+        std::lock_guard<std::mutex> l(g_input_lock);
+        if (e.type == 2 && e.action == 2 && !g_input_events.empty()) {
+            InputEvent* last = ptr<InputEvent>(g_input_events.back());
+            if (last->type == 2 && last->action == 2 && last->pointer_count == e.pointer_count) {
+                bool same = true;
+                for (int i = 0; i < e.pointer_count; i++) same &= last->pointers[i].id == e.pointers[i].id;
+                if (same) {
+                    memcpy(last, &e, sizeof e);
+                    return;
+                }
+            }
+        }
+    }
     u32 g = mem::malloc(sizeof(InputEvent));
     memcpy(ptr(g), &e, sizeof e);
     {

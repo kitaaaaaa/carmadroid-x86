@@ -37,13 +37,37 @@ def write_img(path, w, h, rgba, basic=0x6b):
     open(path, 'wb').write(hdr + body)
 
 
+def unrle(raw, n):
+    out = bytearray()
+    i = 0
+    while i < len(raw) and len(out) < n:
+        c = raw[i]
+        i += 1
+        if c & 0x80:
+            out += raw[i:i + (c & 0x7f)]
+            i += c & 0x7f
+        else:
+            out += bytes([raw[i]]) * c
+            i += 1
+    return bytes(out[:n])
+
+
 def read_img(path):
-    """(w, h, rgba) for IMGs this tool writes: format 0 uncompressed A,R,G,B."""
+    """(w, h, rgba) for IMGs this tool writes: format 0 (one plane A,R,G,B) or format 6 (4 RLE planes)."""
     d = open(path, 'rb').read()
     fmt, size, w, h = struct.unpack_from('<IIHH', d, 12)
-    px = d[24:24 + w * h * 4]
-    rgba = bytearray(len(px))
-    rgba[0::4], rgba[1::4], rgba[2::4], rgba[3::4] = px[1::4], px[2::4], px[3::4], px[0::4]
+    rgba = bytearray(w * h * 4)
+    if fmt == 6:
+        sizes = struct.unpack_from('<4I', d, 24)
+        p = 40
+        planes = []
+        for sz in sizes:
+            planes.append(unrle(d[p:p + sz], w * h))
+            p += sz
+        rgba[3::4], rgba[0::4], rgba[1::4], rgba[2::4] = planes
+    else:
+        px = d[24:24 + w * h * 4]
+        rgba[0::4], rgba[1::4], rgba[2::4], rgba[3::4] = px[1::4], px[2::4], px[3::4], px[0::4]
     return w, h, bytes(rgba)
 
 
@@ -200,6 +224,70 @@ def render_car(folder, width, height, yaw_deg=-35.0, pitch_deg=-28.0, fill=0.66,
     return resize(W, H, bytes(img), width, height)
 
 
+def render_top(folder, width, height, px_per_m, ss=2):
+    """Top view in colour, front pointing right, at a fixed scale (pixels per metre) so cars keep their
+    relative sizes, as on the pre-race grid screen."""
+    tris = load_car(folder)
+    W, H = width * ss, height * ss
+    s = px_per_m * ss
+    xs = [p[0] for ps, _, _ in tris for p in ps]
+    zs = [p[2] for ps, _, _ in tris for p in ps]
+    cx, cz = (min(xs) + max(xs)) / 2, (min(zs) + max(zs)) / 2
+    # shrink to fit if a car is bigger than the picture
+    s = min(s, 0.97 * W / (max(zs) - min(zs)), 0.97 * H / (max(xs) - min(xs)))
+    img = bytearray(W * H * 4)
+    zbuf = [-1e30] * (W * H)
+    light = (-0.3, 0.9, 0.3)
+
+    def proj(p):  # front (+z) to the right, the car's left side (-x) at the top
+        return W / 2 + (p[2] - cz) * s, H / 2 + (p[0] - cx) * s, p[1]
+
+    for ps, uvs, tex in tris:
+        a, b, c = [proj(p) for p in ps]
+        ux, uy, uz = [ps[1][k] - ps[0][k] for k in range(3)]
+        vx, vy, vz = [ps[2][k] - ps[0][k] for k in range(3)]
+        nx, ny, nz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
+        nl = math.sqrt(nx * nx + ny * ny + nz * nz) or 1
+        if ny < 0:
+            nx, ny, nz = -nx, -ny, -nz
+        shade = 0.7 + 0.45 * max(0.0, (nx * light[0] + ny * light[1] + nz * light[2]) / nl)
+        area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])
+        if abs(area) < 1e-9:
+            continue
+        x0, x1 = max(0, int(min(a[0], b[0], c[0]))), min(W - 1, int(max(a[0], b[0], c[0])) + 1)
+        y0, y1 = max(0, int(min(a[1], b[1], c[1]))), min(H - 1, int(max(a[1], b[1], c[1])) + 1)
+        for y in range(y0, y1 + 1):
+            for x in range(x0, x1 + 1):
+                px_, py = x + 0.5, y + 0.5
+                w0 = ((b[0] - px_) * (c[1] - py) - (c[0] - px_) * (b[1] - py)) / area
+                w1 = ((c[0] - px_) * (a[1] - py) - (a[0] - px_) * (c[1] - py)) / area
+                w2 = 1 - w0 - w1
+                if w0 < 0 or w1 < 0 or w2 < 0:
+                    continue
+                elev = w0 * a[2] + w1 * b[2] + w2 * c[2]
+                i = y * W + x
+                if elev <= zbuf[i]:
+                    continue
+                if tex:
+                    tw, th, tpx = tex
+                    u = w0 * uvs[0][0] + w1 * uvs[1][0] + w2 * uvs[2][0]
+                    v = w0 * uvs[0][1] + w1 * uvs[1][1] + w2 * uvs[2][1]
+                    ti = ((int(v * th) % th) * tw + int(u * tw) % tw) * 4
+                    if tpx[ti + 3] < 128:
+                        continue
+                    r, g, bl = tpx[ti], tpx[ti + 1], tpx[ti + 2]
+                else:
+                    r = g = bl = 160
+                zbuf[i] = elev
+                o = i * 4
+                img[o] = min(255, int(r * shade)); img[o + 1] = min(255, int(g * shade))
+                img[o + 2] = min(255, int(bl * shade)); img[o + 3] = 255
+    out = resize(W, H, bytes(img), width, height)
+    # the pre-race grid shows cars rotated 180 degrees from this view
+    px = [out[i:i + 4] for i in range(0, len(out), 4)]
+    return b''.join(reversed(px))
+
+
 # ---------------------------------------------------------------------------------------------
 def portrait(fli_path, size):
     """Square driver portrait from the first frame of a PC mugshot animation (the name label and the
@@ -228,8 +316,10 @@ def save_png(path, w, h, rgba, bg=(90, 90, 90)):
 
 
 # Picture files per car, under DATA/CONTENT/UI/ASSETS: (folder, width, height)
-CAR_PICTURES = [('PPI_HIGH/THUMBS', 240, 240), ('PPI_LOW/THUMBS', 160, 160),
-                ('H720/GRID', 300, 150), ('H600/GRID', 250, 125), ('H480/GRID', 200, 100)]
+CAR_PICTURES = [('PPI_HIGH/THUMBS', 240, 240), ('PPI_LOW/THUMBS', 160, 160)]
+# Pre-race grid pictures: top views at a common scale (measured from the original cars: ~29 px/m at 300 wide)
+GRID_PICTURES = [('H720/GRID', 300, 150), ('H600/GRID', 250, 125), ('H480/GRID', 200, 100)]
+GRID_PX_PER_M_300 = 29.0
 DRIVER_PICTURES = [('PPI_HIGH/DRIVERS', 138), ('PPI_LOW/DRIVERS', 92)]
 
 
@@ -241,11 +331,12 @@ def make_pictures(game_dir, name, vehicle_folder, mug_fli=None):
         folder = os.path.join(assets, *sub.split('/'))
         if not os.path.isdir(folder):
             continue
-        if w == h:
-            rgba = resize(480, 480, big, w, h)
-        else:  # wide grid pictures: the car centred on a 2:1 canvas
-            rgba = render_car(vehicle_folder, w, h, fill=0.5)
-        write_img(os.path.join(folder, name.upper() + '.IMG'), w, h, rgba)
+        write_img(os.path.join(folder, name.upper() + '.IMG'), w, h, resize(480, 480, big, w, h))
+    for sub, w, h in GRID_PICTURES:
+        folder = os.path.join(assets, *sub.split('/'))
+        if os.path.isdir(folder):
+            write_img(os.path.join(folder, name.upper() + '.IMG'), w, h,
+                      render_top(vehicle_folder, w, h, GRID_PX_PER_M_300 * w / 300))
     if mug_fli and os.path.exists(mug_fli):
         for sub, size in DRIVER_PICTURES:
             folder = os.path.join(assets, *sub.split('/'))

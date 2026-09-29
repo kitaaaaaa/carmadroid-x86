@@ -11,6 +11,7 @@
 #include "roster.h"
 #include "camera_look.h"
 #include "pc_content.h"
+#include "pc_import.h"
 #include "hle/android.h"
 #include "hle/hle_common.h"
 #include "apk.h"
@@ -94,7 +95,8 @@ static fs::path find_file(const std::string& ext, const std::string& prefer) {
 // patches and hooks use fixed code offsets).
 constexpr u32 kSupportedLibCrc = 0xA6646F8D;
 
-struct ScriptedTap { double t; float x, y; bool done; int key = 0; bool pad = false; bool button = false; bool look = false; };
+struct ScriptedTap { double t; float x, y; bool done; int key = 0; bool pad = false; bool button = false; bool look = false;
+                     bool drag = false; float x1 = 0, y1 = 0; int steps = 12, step_ms = 25; };
 
 int main(int argc, char** argv) {
     int exit_after = 0;
@@ -106,7 +108,7 @@ int main(int argc, char** argv) {
     float pad_steer = 0, pad_throttle = 0;
     std::vector<ScriptedTap> taps;
     bool skip_version_check = false;
-    std::string apk_arg, obb_arg, extract_dir, game_dir;
+    std::string apk_arg, obb_arg, extract_dir, game_dir, splat_dir;
     hle::g_config.root = (exe_dir() / "userdata").string();
 
     for (int i = 1; i < argc; i++) {
@@ -116,7 +118,8 @@ int main(int argc, char** argv) {
         else if (a == "-q") g_log_level = 0;
         else if (a == "--apk" && i + 1 < argc) apk_arg = argv[++i];
         else if (a == "--obb" && i + 1 < argc) obb_arg = argv[++i];
-        else if (a == "--extract-data" && i + 1 < argc) extract_dir = argv[++i];
+        else if (a == "--extract-data")  // optional folder; default: gamedata next to the exe
+            extract_dir = i + 1 < argc && argv[i + 1][0] != '-' ? argv[++i] : "*default*";
         else if (a == "--game-dir" && i + 1 < argc) game_dir = argv[++i];
         else if ((a == "--data" || a == "--root") && i + 1 < argc) hle::g_config.root = argv[++i];
         else if (a == "--skip-version-check") skip_version_check = true;
@@ -127,6 +130,7 @@ int main(int argc, char** argv) {
         else if (a == "--unlock-all-cars") content::g_unlock_all_cars = true;
         else if (a == "--car" && i + 1 < argc) content::g_force_car = argv[++i];
         else if (a == "--pc-data" && i + 1 < argc) pc_content::g_dir = argv[++i];
+        else if (a == "--splat-data" && i + 1 < argc) splat_dir = argv[++i];
         else if (a == "--no-pc-data") pc_data_off = true;
         else if (a == "--no-cockpit") pc_content::g_cockpit = false;
         else if (a == "--look-invert-x") camera_look::g_yaw_sign = -1;
@@ -179,6 +183,12 @@ int main(int argc, char** argv) {
             ScriptedTap t{};
             if (sscanf(argv[++i], "%lf,%d", &t.t, &t.key) == 2) taps.push_back(t);
         }
+        else if (a == "--drag-at" && i + 1 < argc) {  // --drag-at seconds,x0,y0,x1,y1 (mouse drag, testing)
+            ScriptedTap t{};
+            t.drag = true;
+            if (sscanf(argv[++i], "%lf,%f,%f,%f,%f,%d,%d", &t.t, &t.x, &t.y, &t.x1, &t.y1, &t.steps, &t.step_ms) >= 5)
+                taps.push_back(t);
+        }
         else if (a == "--tap" && i + 1 < argc) {  // --tap seconds,x,y
             ScriptedTap t{};
             if (sscanf(argv[++i], "%lf,%f,%f", &t.t, &t.x, &t.y) == 3) taps.push_back(t);
@@ -187,7 +197,32 @@ int main(int argc, char** argv) {
     fs::create_directories(hle::g_config.root);
     g_log_file = fopen((hle::g_config.root + "/carmadroid.log").c_str(), "w");
 
+    // --- PC Carmageddon (optional) --------------------------------------------------------------
+    // --pc-data / --splat-data, or the PC game's CARMA / CARSPLAT folders next to the exe (CARSPLAT is
+    // also looked for next to CARMA, as in the PC game's install folder).
+    if (pc_data_off) {
+        pc_content::g_dir.clear();
+        splat_dir.clear();
+    } else {
+        if (pc_content::g_dir.empty())
+            for (const fs::path& dir : {exe_dir() / "CARMA", exe_dir()})
+                if (fs::exists(dir / "DATA" / "64X48X8" / "CARS")) { pc_content::g_dir = dir.string(); break; }
+        if (splat_dir.empty()) {
+            std::vector<fs::path> dirs{exe_dir() / "CARSPLAT"};
+            if (!pc_content::g_dir.empty()) dirs.push_back(fs::path(pc_content::g_dir).parent_path() / "CARSPLAT");
+            for (const fs::path& dir : dirs)
+                if (fs::exists(dir / "DATA" / "CARS")) { splat_dir = dir.string(); break; }
+        }
+    }
+    pc_content::g_splat_dir = splat_dir;
+
     // --- Game files -------------------------------------------------------------------------
+    // Unpacked game data (--extract-data) in the gamedata folder next to the exe is used automatically.
+    const fs::path default_game_dir = exe_dir() / "gamedata";
+    if (extract_dir == "*default*") extract_dir = default_game_dir.string();
+    if (game_dir.empty() && extract_dir.empty() && fs::exists(default_game_dir / "lib" / "armeabi-v7a" / "libParsons.so") &&
+        fs::is_directory(default_game_dir / "DATA"))
+        game_dir = default_game_dir.string();
     fs::path apk_path = apk_arg.empty() ? find_file(".apk", "carmageddon") : fs::path(apk_arg);
     fs::path obb_path = obb_arg.empty() ? find_file(".obb", "carmageddon") : fs::path(obb_arg);
     if (!game_dir.empty()) {
@@ -197,6 +232,9 @@ int main(int argc, char** argv) {
             error_box("Game folder not found: " + game_dir);
             return 1;
         }
+        LOGI("running from the unpacked game data in %s", game_dir.c_str());
+        // Convert and install the PC content (only when it isn't installed yet, or changed).
+        pc_import::install(game_dir, pc_content::g_dir, splat_dir);
         std::string err;
         const std::string packed = hle::g_config.root + "/gamedata.obb";
         if (!gamedata::build_obb(game_dir, packed, err)) {
@@ -214,11 +252,15 @@ int main(int argc, char** argv) {
         return 1;
     } else if (!extract_dir.empty()) {
         std::string err;
+        pc_import::uninstall(extract_dir);  // unpacking again: start from the original files
         if (!gamedata::extract(apk_path.string(), obb_path.string(), extract_dir, err)) {
             error_box("Extracting the game data failed:\n" + err);
             return 1;
         }
-        const std::string done = "Game data extracted to " + extract_dir + "\n\nRun it with --game-dir \"" + extract_dir + "\"";
+        const std::string done =
+            "Game data extracted to " + extract_dir + "\n\n" +
+            (fs::path(extract_dir) == default_game_dir ? std::string("It is used automatically from now on (delete the folder to go back to the APK and OBB).")
+                                                       : "Run it with --game-dir \"" + extract_dir + "\"");
         fprintf(stderr, "%s\n", done.c_str());
         if (!popt.hidden) MessageBoxA(nullptr, done.c_str(), "carmadroid-x86", MB_OK | MB_ICONINFORMATION);
         return 0;
@@ -293,11 +335,6 @@ int main(int argc, char** argv) {
     content::apply();
     roster::apply();
     camera_look::apply_patches();
-    // Optional PC Carmageddon data: --pc-data DIR, or a CARMA folder (the PC game's) next to the exe.
-    if (pc_data_off) pc_content::g_dir.clear();
-    else if (pc_content::g_dir.empty())
-        for (const fs::path& dir : {exe_dir() / "CARMA", exe_dir()})
-            if (fs::exists(dir / "DATA" / "64X48X8" / "CARS")) { pc_content::g_dir = dir.string(); break; }
     pc_content::apply_patches();
     audio::apply_patches();
     for (Module* m : {fmodex, fmodevent, parsons}) loader::run_initializers(m);
@@ -329,6 +366,16 @@ int main(int argc, char** argv) {
                 else if (t.button) controller::simulate_button(t.key);
                 else if (t.pad) controller::simulate(t.x, t.y);
                 else if (t.key) platform::inject_key(t.key);
+                else if (t.drag) {
+                    platform::touch_down(0, t.x, t.y);
+                    for (int k = 1; k <= t.steps; k++) {
+                        SDL_Delay(t.step_ms);
+                        platform::touch_move(0, t.x + (t.x1 - t.x) * k / t.steps, t.y + (t.y1 - t.y) * k / t.steps);
+                    }
+                    SDL_Delay(t.step_ms);
+                    platform::touch_up(0);
+                    LOGI("injected drag %.0f,%.0f -> %.0f,%.0f", t.x, t.y, t.x1, t.y1);
+                }
                 else platform::inject_tap(t.x, t.y);
             }
     }

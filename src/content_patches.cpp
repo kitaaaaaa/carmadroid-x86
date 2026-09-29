@@ -2,6 +2,7 @@
 #include "content_patches.h"
 #include "elf_loader.h"
 #include "memory.h"
+#include "platform.h"
 
 namespace content {
 
@@ -53,11 +54,15 @@ void on_game_frame() {
         for (Module* m : loader::modules())
             if (m->name == "libParsons.so") g_lib = m->base;
     if (!g_lib) return;
-    if (!g_force_car.empty()) force_car();
+    // Keep re-selecting until the first race: loading the save would otherwise overwrite it.
+    if (!g_force_car.empty()) {
+        if (platform::in_race()) g_force_car.clear();
+        else force_car();
+    }
     if (g_unlock_all_cars) mem::w8(g_lib + kUnlockAllCarsFlag, 1);
 }
 
-// --car: once the car list is loaded, make NAME the selected car in the current save slot.
+// --car: make NAME the selected car in the current save slot.
 static void force_car() {
     const int n = (int)mem::r32(g_lib + kNumQuickCars);
     const u32 holder = mem::r32(g_lib + kSaveSlotPtrGot);
@@ -67,9 +72,10 @@ static void force_car() {
     for (int i = 0; i < n; i++) {
         const char* s = mem::str(mem::r32(names + i * 4));
         if (s && _stricmp(s, g_force_car.c_str()) == 0) {
-            mem::w32(slot + kSlotSelectedCar, (u32)i);
-            LOGI("content: selected car %s (#%d)", s, i);
-            g_force_car.clear();
+            if (mem::r32(slot + kSlotSelectedCar) != (u32)i) {
+                mem::w32(slot + kSlotSelectedCar, (u32)i);
+                LOGI("content: selected car %s (#%d)", s, i);
+            }
             return;
         }
     }

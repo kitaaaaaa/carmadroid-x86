@@ -50,7 +50,7 @@ FetchContent_Declare(sdl2
 FetchContent_MakeAvailable(sdl2)
 
 # --- carmadroid ---------------------------------------------------------------------------------
-file(GLOB SOURCES CONFIGURE_DEPENDS src/*.cpp src/hle/*.cpp)
+file(GLOB SOURCES CONFIGURE_DEPENDS src/*.cpp src/hle/*.cpp src/pcimport/*.cpp)
 add_executable(carmadroid ${SOURCES} third_party/miniz/miniz.c)
 target_include_directories(carmadroid PRIVATE src third_party/miniz ${sdl2_SOURCE_DIR}/include)
 target_link_libraries(carmadroid PRIVATE dynarmic ${sdl2_SOURCE_DIR}/lib/x64/SDL2.lib opengl32 winmm)

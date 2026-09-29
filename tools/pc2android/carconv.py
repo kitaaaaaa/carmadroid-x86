@@ -54,8 +54,10 @@ def norm(a):
 # ---------------------------------------------------------------------------------------------
 class Mesh:
     """Triangles with per-corner data, grouped by material name."""
-    def __init__(self):
-        self.tris = []  # (material, [(pos, uv) * 3])
+    def __init__(self, two_sided=None, inset=None):
+        self.tris = []  # (material, [(pos, uv) * 3], back face?)
+        self.two_sided = two_sided if two_sided is not None else set()  # Android material names
+        self.inset = inset if inset is not None else {}  # material -> (texture w, h): half-texel UV inset
 
     def add_model(self, model, matrix, mat_names, default_mat):
         flip = det3(matrix) < 0
@@ -66,14 +68,19 @@ class Mesh:
             for vi in f[:3]:
                 p = to_android(xform(matrix, model.verts[vi]))
                 uv = model.uvs[vi] if vi < len(model.uvs) else (0.0, 0.0)
+                if mat in self.inset:  # sample texel centres like the PC renderer (no wrap-around at edges)
+                    tw, th = self.inset[mat]
+                    uv = (uv[0] * (tw - 1) / tw + 0.5 / tw, uv[1] * (th - 1) / th + 0.5 / th)
                 corners.append((p, uv))
             # z flip mirrors: reverse winding (and again if the actor matrix mirrors)
             if not flip:
                 corners = [corners[0], corners[2], corners[1]]
-            self.tris.append((mat, corners))
+            self.tris.append((mat, corners, False))
+            if mat in self.two_sided:  # PC two-sided material: also draw the inside
+                self.tris.append((mat, [corners[0], corners[2], corners[1]], True))
 
     def bounds(self):
-        ps = [c[0] for _, cs in self.tris for c in cs]
+        ps = [c[0] for _, cs, _ in self.tris for c in cs]
         lo = [min(p[i] for p in ps) for i in range(3)]
         hi = [max(p[i] for p in ps) for i in range(3)]
         return lo, hi
@@ -82,17 +89,17 @@ class Mesh:
 def build_mdl(mesh):
     """An MDL (v6.2, with USER data) from a Mesh."""
     mats = []
-    for m, _ in mesh.tris:
+    for m, _, _ in mesh.tris:
         if m not in mats:
             mats.append(m)
     # smooth normals per position (C1 models share vertices between faces)
     face_n = []
     acc = {}
-    for m, cs in mesh.tris:
+    for m, cs, back in mesh.tris:
         n = norm(cross(sub(cs[1][0], cs[0][0]), sub(cs[2][0], cs[0][0])))
         face_n.append(n)
         for p, _ in cs:
-            k = tuple(round(x, 5) for x in p)
+            k = tuple(round(x, 5) for x in p) + (back,)
             a = acc.setdefault(k, [0.0, 0.0, 0.0])
             a[0] += n[0]; a[1] += n[1]; a[2] += n[2]
     out = st.Mdl()
@@ -104,12 +111,12 @@ def build_mdl(mesh):
         start = len(verts)
         index = {}
         tri_list = []
-        for ti, (m, cs) in enumerate(mesh.tris):
+        for ti, (m, cs, back) in enumerate(mesh.tris):
             if m != mname:
                 continue
             ids = []
             for p, uv in cs:
-                k = tuple(round(x, 5) for x in p)
+                k = tuple(round(x, 5) for x in p) + (back,)
                 n = norm(acc[k])
                 key = (k, round(uv[0], 5), round(uv[1], 5))
                 if key not in index:
@@ -163,8 +170,41 @@ def build_mdl(mesh):
 # ---------------------------------------------------------------------------------------------
 # Textures and materials
 # ---------------------------------------------------------------------------------------------
+def bleed(w, h, rgba):
+    """Gives transparent pixels the colour of a neighbouring opaque one (repeatedly), so texture
+    filtering at the edge of a see-through area doesn't blend in black."""
+    px = bytearray(rgba)
+    solid = [px[i * 4 + 3] >= 128 for i in range(w * h)]
+    if all(solid) or not any(solid):
+        return bytes(px)
+    for _ in range(8):
+        grown = []
+        for y in range(h):
+            for x in range(w):
+                i = y * w + x
+                if solid[i]:
+                    continue
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    j = ((y + dy) % h) * w + (x + dx) % w
+                    if solid[j]:
+                        px[i * 4:i * 4 + 3] = px[j * 4:j * 4 + 3]
+                        grown.append(i)
+                        break
+        if not grown:
+            break
+        for i in grown:
+            solid[i] = True
+    return bytes(px)
+
+
 def write_img(path, w, h, rgba):
-    """IMG v1.0 with one uncompressed plane, stored A,R,G,B per pixel."""
+    """Solid textures: IMG v1.0, one uncompressed A,R,G,B plane (drawn as normal opaque surfaces).
+    Textures with transparent pixels (two-sided PC materials only): 4 RLE planes with the one-bit-alpha
+    flag (0x04), as the game's own see-through textures."""
+    if any(a < 128 for a in rgba[3::4]):
+        import uiimg
+        uiimg.write_img(path, w, h, rgba, basic=0x06)
+        return
     data = bytearray(len(rgba))
     data[0::4], data[1::4], data[2::4], data[3::4] = rgba[3::4], rgba[0::4], rgba[1::4], rgba[2::4]
     hdr = b'IMAGEMAP' + bytes((0, 1, 0, 0)) + struct.pack('<IIHH', 0, len(data), w, h)
@@ -294,7 +334,14 @@ def convert(data_dirs, car_txt, out_dir, template_dir, mtl_template):
             used_mats[key] = '%s_%s' % (prefix, key.replace('.MAT', '').lower())
         return used_mats[key]
 
-    body = Mesh()
+    two_sided = {'%s_%s' % (prefix, k.upper().replace('.MAT', '').lower()) for k, m in materials.items() if m.flags & 0x1000}
+    inset = {}
+    for k, m in materials.items():
+        if m.texture:
+            t = pixmaps.rgba(m.texture)
+            if t and any(a < 128 for a in t[2][3::4]):
+                inset['%s_%s' % (prefix, k.upper().replace('.MAT', '').lower())] = (t[0], t[1])
+    body = Mesh(two_sided, inset)
     wheels = {}  # android node name -> (world matrix, Mesh)
 
     def visit(actor, parent_m, inherited_mat):
@@ -305,7 +352,7 @@ def convert(data_dirs, car_txt, out_dir, template_dir, mtl_template):
             model = models[actor.model.upper()]
             default = mat_name(mat) if mat else mat_name('DEFAULT')
             if wheel:
-                mesh = Mesh()
+                mesh = Mesh(two_sided, inset)
                 rot = m[:9] + [0.0, 0.0, 0.0]
                 mesh.add_model(model, rot, mat_name, default)
                 wheels[wheel] = (m, mesh)
@@ -343,6 +390,7 @@ def convert(data_dirs, car_txt, out_dir, template_dir, mtl_template):
                 c = palette[min(255, (m_index_base(m) or 0))] + (255,)
             tex = (8, 8, bytes(c[:3]) * 0 + bytes((c[0], c[1], c[2], 255)) * 64)
         w, h, rgba = tex
+        rgba = bleed(w, h, rgba)
         write_img(os.path.join(out_dir, name.upper() + '.IMG'), w, h, rgba)
         open(os.path.join(out_dir, name.upper() + '.MTL'), 'wb').write(mtl_bytes(tmpl, name))
     print('materials', len(used_mats))
@@ -355,10 +403,42 @@ def convert(data_dirs, car_txt, out_dir, template_dir, mtl_template):
     a = txt.index('<Shape>')
     b = txt.index('<ShapeCheckSum>')
     e = txt.index('\n', txt.index('\n', b) + 1)
-    txt = (txt[:a] + '<Shape>\n(default label)\n1\nRoundedAlignedCuboid\n0.15\n%f,%f,%f\n%f,%f,%f\n\n\n'
-           '<ShapeCheckSum>\n-1' % (lo[0], max(lo[1], 0.2), lo[2], hi[0], hi[1], hi[2]) + txt[e:])
+    wheel_spots = []
+    for m, mesh in wheels.values():
+        pos = to_android((m[9], m[10], m[11]))
+        wlo, whi = mesh.bounds()
+        wheel_spots.append((pos[0], pos[2], (whi[0] - wlo[0]) / 2, (whi[1] - wlo[1]) / 2))
+    txt = txt[:a] + '<Shape>\n' + shape_text(lo, hi, wheel_spots) + '\n\n<ShapeCheckSum>\n-1' + txt[e:]
     open(os.path.join(out_dir, 'CAR.TXT'), 'w', encoding='latin1', newline='\n').write(txt)
     print('bounds', [round(x, 2) for x in lo], [round(x, 2) for x in hi])
+
+
+# Every car's wheels hang from mounts 0.2 m above the car's base, near the tyres' outer edges, with
+# only 0.27 m of travel (the wheel radius doesn't change that). If the body is higher than the stock
+# cars' (0.35 m at most), landing, rolling in a turn or hitting a kerb pushes mounts below the road, the
+# wheels lose the ground and the car sits on its body.
+LOWEST_BODY = 0.35
+
+
+def shape_text(lo, hi, wheels=()):
+    """Collision shape for CAR.TXT: a box around the body. A body higher than LOWEST_BODY gets a base
+    below it at LOWEST_BODY, as wide as the tyres' outer edges and reaching half a wheel radius past the
+    axles, so it meets the road before any wheel mount can. wheels: (x, z, half width, radius) each."""
+    lowest = LOWEST_BODY
+    if lo[1] <= lowest:
+        return '(default label)\n1\nRoundedAlignedCuboid\n0.15\n%f,%f,%f\n%f,%f,%f\n' % (
+            lo[0], max(lo[1], 0.2), lo[2], hi[0], hi[1], hi[2])
+    pts = [(x, y, z) for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])]
+    if wheels:
+        mid = sum(w[1] for w in wheels) / len(wheels)
+        for x, z, hw, r in wheels:
+            pts.append((x + (hw if x > 0 else -hw), lowest, z + (r if z > mid else -r) * 0.5))
+    else:
+        cx, cz = (lo[0] + hi[0]) / 2, (lo[2] + hi[2]) / 2
+        hx, hz = (hi[0] - lo[0]) / 2, (hi[2] - lo[2]) / 2
+        pts += [(cx + sx * hx, lowest, cz + sz * hz * 0.6) for sx in (-1, 1) for sz in (-1, 1)]
+    return ('(default label)\n1\nRoundedPolyhedron\n0.150000\n%d\n' % len(pts)
+            + ''.join('%f,%f,%f\n' % q for q in pts) + '\nform_collision_groups\n1\n')
 
 
 def m_index_base(m):

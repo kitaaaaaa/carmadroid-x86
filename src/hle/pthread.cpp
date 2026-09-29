@@ -116,7 +116,8 @@ struct ThreadInfo {
     u32 id;
     std::thread t;
     u32 result = 0;
-    bool detached = false;
+    bool detached = false;  // guarded by g_threads_lock
+    bool finished = false;  // guarded by g_threads_lock
 };
 std::mutex g_threads_lock;
 std::unordered_map<u32, ThreadInfo*> g_threads;
@@ -264,22 +265,30 @@ HLE(pthread_create) {
     auto* ti = new ThreadInfo();
     ti->id = g_next_tid++;
     ti->detached = detached;
-    {
-        std::lock_guard<std::mutex> l(g_threads_lock);
-        g_threads[ti->id] = ti;
-    }
     mem::w32(out, ti->id);
     LOGI("pthread_create: thread %u -> %s", ti->id, symbolize(fn).c_str());
+    // Held until ti->t is set up: the thread takes this lock before it can free ti.
+    std::lock_guard<std::mutex> l(g_threads_lock);
+    g_threads[ti->id] = ti;
     ti->t = std::thread([ti, fn, arg, stack] {
-        // Threads started by FMOD (its mixer/stream threads) get the audio-safe JIT settings.
-        Module* m = loader::module_at(fn);
-        const bool audio = m && m->name.rfind("libfmod", 0) == 0;
-        if (audio) LOGI("thread %u is an FMOD thread (audio JIT settings)", ti->id);
-        Cpu cpu(ti->id, stack, audio);
-        Cpu::current = &cpu;
-        u32 r = cpu.call(fn, {arg});
-        ti->result = cpu.exiting ? cpu.exit_value : r;
+        {
+            // Threads started by FMOD (its mixer/stream threads) get the audio-safe JIT settings.
+            Module* m = loader::module_at(fn);
+            const bool audio = m && m->name.rfind("libfmod", 0) == 0;
+            if (audio) LOGI("thread %u is an FMOD thread (audio JIT settings)", ti->id);
+            Cpu cpu(ti->id, stack, audio);  // its stack is released when cpu goes out of scope
+            Cpu::current = &cpu;
+            u32 r = cpu.call(fn, {arg});
+            ti->result = cpu.exiting ? cpu.exit_value : r;
+            Cpu::current = nullptr;
+        }
         LOGI("thread %u finished", ti->id);
+        std::lock_guard<std::mutex> l(g_threads_lock);
+        ti->finished = true;
+        if (ti->detached) {  // nobody will join: clean up here
+            g_threads.erase(ti->id);
+            delete ti;
+        }
     });
     if (detached) ti->t.detach();
     c.ret(0);
@@ -291,15 +300,31 @@ HLE(pthread_join) {
         auto it = g_threads.find(c.r(0));
         if (it == g_threads.end()) { c.ret(3 /* ESRCH */); return; }
         ti = it->second;
+        if (ti->detached) { c.ret(22 /* EINVAL */); return; }
     }
     if (ti->t.joinable()) ti->t.join();
     if (c.r(1)) mem::w32(c.r(1), ti->result);
+    {
+        std::lock_guard<std::mutex> l(g_threads_lock);
+        g_threads.erase(ti->id);
+    }
+    delete ti;
     c.ret(0);
 }
 HLE(pthread_detach) {
     std::lock_guard<std::mutex> l(g_threads_lock);
     auto it = g_threads.find(c.r(0));
-    if (it != g_threads.end() && it->second->t.joinable()) it->second->t.detach();
+    if (it == g_threads.end()) { c.ret(3 /* ESRCH */); return; }
+    ThreadInfo* ti = it->second;
+    if (ti->detached) { c.ret(22 /* EINVAL */); return; }
+    if (ti->finished) {  // already done: reap it now (the host thread is exiting, join is immediate)
+        if (ti->t.joinable()) ti->t.join();
+        g_threads.erase(it);
+        delete ti;
+    } else {
+        ti->detached = true;
+        ti->t.detach();
+    }
     c.ret(0);
 }
 HLE(pthread_exit) {

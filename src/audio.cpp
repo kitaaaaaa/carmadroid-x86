@@ -5,6 +5,8 @@
 #include <SDL.h>
 #include <atomic>
 #include <thread>
+#include <mutex>
+#include <unordered_map>
 
 namespace audio {
 namespace {
@@ -60,7 +62,32 @@ void run() {
 
 int g_sample_rate = 48000;
 
+static void limit_skid_sound_rate() {
+    // Sound_Play_SkidMark(VehicleSounds*, Lump*, float intensity, Vehicle*) runs once per frame. When
+    // skidding eases off it fades the squeal by a fixed factor per call, and when skidding resumes it
+    // restarts the sample at a new random pitch. At unlocked frame rates the fade completes almost
+    // instantly, so the squeal restarts many times a second: warbling pitch and digital-sounding
+    // clicks/beeps. Running it at most 60 times a second per car restores the phone behaviour.
+    static u32 orig = 0;
+    const u32 fn = loader::find_symbol("_Z19Sound_Play_SkidMarkP13VehicleSoundsPN2BZ4LumpEfP7Vehicle");
+    if (!fn) { LOGE("audio: Sound_Play_SkidMark not found"); return; }
+    orig = hle::hook_function(fn, "Sound_Play_SkidMark", [](Cpu& c) {
+        static std::mutex m;
+        static std::unordered_map<u64, u64> last_ms;  // (VehicleSounds*, Lump*) -> last update time
+        const u64 now = SDL_GetTicks64();
+        const u64 key = ((u64)c.r(0) << 32) | c.r(1);
+        {
+            std::lock_guard<std::mutex> l(m);
+            u64& t = last_ms[key];
+            if (now - t < 16) return;  // skip this frame (void function)
+            t = now;
+        }
+        c.call(orig, {c.r(0), c.r(1), c.r(2), c.r(3)});
+    });
+}
+
 void apply_patches() {
+    limit_skid_sound_rate();
     // The game leaves FMOD at its Android default (24 kHz, linear resampling). Just before FMOD
     // initialises, request a higher mix rate and spline resampling.
     if (g_sample_rate <= 0) return;

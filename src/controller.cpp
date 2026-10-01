@@ -1,9 +1,13 @@
 #include "controller.h"
 #include "elf_loader.h"
 #include "hle/android.h"
+#include "hle/hle_common.h"
 #include "platform.h"
 #include <atomic>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <string>
 
 namespace controller {
 namespace {
@@ -19,6 +23,12 @@ constexpr u32 kCameraRollLoad = 0x578590;  // "ldr r0,[r3,#8]" feeding Camera_Se
 constexpr u32 kCameraStatesGot = 0x66F73C; // GOT slot -> per-player camera state (292 bytes each, mode at +0xc)
 constexpr u32 kMapShownGot = 0x670254;     // GOT slot -> float, nonzero while the track map is open
 constexpr u32 kControllerMode = 0x84A540;  // Input_GetInputGameControllerMode()
+// UI properties (what the menu sliders watch): CGameLube object ("LUBE"), CGameLube::GetProperty(name)
+// (finds or creates), CLubeProperty::getScalar() / setScalar(float) (softfp: floats in core registers).
+constexpr u32 kGetProperty = 0x529420;
+constexpr u32 kPropGetScalar = 0x4657D8;
+constexpr u32 kPropSetScalar = 0x465E08;
+constexpr float kDefaultSteerDeadzone = 12;  // percent
 
 enum Zone { ZONE_HANDBRAKE = 4, ZONE_DAMAGE = 7, ZONE_PRATCAM = 8, ZONE_PAUSE = 9 };
 
@@ -60,6 +70,9 @@ u32 g_saved_steer_mode = 0, g_saved_throttle_mode = 0;
 
 u32 g_process_touch_zones_orig = 0;  // trampoline to the original Input_ProcessTouchZones
 u32 g_touch_control_update_orig = 0;  // trampoline to the original CGameLube::TouchControlUpdate
+// In action replay the pad doesn't drive: the replay keeps its on-screen controls and sees a phone lying flat,
+// as without a pad (set on the game thread each frame).
+std::atomic<bool> g_in_replay{false};
 
 u32 lib_base() {
     static u32 base = [] {
@@ -82,6 +95,73 @@ bool is_paused() {
 }
 
 float axis(SDL_GameControllerAxis a) { return SDL_GameControllerGetAxis(g_pad, a) / 32767.0f; }
+
+// Steering deadzone in percent: the controls screen's "steering_deadzone" slider (see pc_import's controls
+// screen), kept in userdata/carmadroid.ini. Read on the main thread, set on the game thread.
+std::atomic<float> g_steer_deadzone{kDefaultSteerDeadzone};
+
+std::string settings_path() { return hle::g_config.root + "/carmadroid.ini"; }
+
+void load_settings() {
+    if (FILE* f = fopen(settings_path().c_str(), "r")) {
+        char line[128];
+        float v;
+        while (fgets(line, sizeof line, f))
+            if (sscanf(line, "steering_deadzone=%f", &v) == 1 && v >= 0 && v <= 50) g_steer_deadzone = v;
+        fclose(f);
+    }
+}
+
+void save_settings() {
+    if (FILE* f = fopen(settings_path().c_str(), "w")) {
+        fprintf(f, "steering_deadzone=%g\n", (double)g_steer_deadzone.load());
+        fclose(f);
+    }
+}
+
+u32 fbits(float v) { u32 u; memcpy(&u, &v, 4); return u; }
+float bitsf(u32 u) { float v; memcpy(&v, &u, 4); return v; }
+
+// Keeps the "steering_deadzone" UI property and g_steer_deadzone in step: the saved value goes to the
+// property once the menu system is up, then slider changes come back (and are saved).
+void sync_deadzone_property(Cpu& c, u32 base) {
+    static u32 frame = 0, name = 0;
+    static bool pushed = false;
+    static float last = -1;
+    if (frame++ % 30) return;
+    // CGameLube::GetProperty goes through CMenuSystem -> its CLube -> a virtual call (vtable + 0xc0): wait
+    // until that whole chain exists (the objects are there before they are constructed).
+    static const u32 lube = loader::find_symbol("LUBE");
+    if (!lube || !mem::valid(lube + 4, 4)) return;
+    const u32 menus = mem::r32(lube + 4);
+    if (!menus || !mem::valid(menus, 4)) return;
+    const u32 clube = mem::r32(menus);
+    if (!clube || !mem::valid(clube, 4)) return;
+    const u32 vtable = mem::r32(clube);
+    if (!vtable || !mem::valid(vtable + 0xc0, 4) || !mem::r32(vtable + 0xc0)) return;
+    if (!name) {
+        name = mem::strdup("steering_deadzone");
+        load_settings();
+    }
+    const u32 prop = c.call(base + kGetProperty, {lube, name});
+    if (!prop) return;
+    if (!pushed) {
+        pushed = true;
+        last = g_steer_deadzone;
+        c.call(base + kPropSetScalar, {prop, fbits(last)});
+        return;
+    }
+    float v = bitsf(c.call(base + kPropGetScalar, {prop}));
+    if (!(v >= 0)) v = 0;
+    if (v > 50) v = 50;
+    v = std::round(v);
+    if (v != last) {
+        last = v;
+        g_steer_deadzone = v;
+        save_settings();
+        LOGI("controller: steering deadzone %g%%", (double)v);
+    }
+}
 
 float deadzone(float v, float dz) {
     float m = std::fabs(v);
@@ -164,10 +244,26 @@ void process_touch_zones_hook(Cpu& c) {
                 else c.call(sym("_Z20Structure_DisplayMapf"), {0});
             }
             if (g_pending[ACT_REPLAY].exchange(0)) {
-                // Action replay (the swipe from the right edge); pressing again leaves it.
+                // Action replay: what the swipe from the right edge does when it completes (in
+                // Input_ProcessTouchZones): playback controls fully shown, their slide and the replay rate
+                // override cleared, then AR_EnterReplay. Pressing again closes it like the controls' exit.
                 LOGI("pad: action replay");
-                if (c.call(sym("_Z15AR_InReplayModev"), {}) & 0xFF) c.call(sym("_Z13AR_ExitReplayv"), {});
-                else c.call(sym("_Z14AR_EnterReplayv"), {});
+                if (c.call(sym("_Z15AR_InReplayModev"), {}) & 0xFF) {
+                    c.call(sym("_Z13Input_CloseARv"), {});
+                } else {
+                    static const u32 proportion = sym("gAR_controls_proportion"), speed = sym("gAR_controls_speed"),
+                                     save_bar = sym("gAR_HUD_display_save_progress_bar");
+                    const u32 input = lib_base() + kInputState;
+                    if (proportion) mem::w32(proportion, 0x3F800000);  // 1.0
+                    if (speed) mem::w32(speed, 0);
+                    mem::w32(input + 0x60C, 0);                         // replay rate override
+                    mem::w8(input + 0x618, 0);
+                    mem::w8(input + 0x619, 0);
+                    if (save_bar) mem::w8(save_bar, 0);
+                    c.call(sym("_Z33Structure_ARWindowSliding_UnPausef"), {f1});
+                    c.call(sym("_Z14AR_EnterReplayv"), {});
+                    mem::w32(input + 0x614, 0xBF800000);                // -1.0
+                }
             }
             if (g_pending[ACT_PAUSE].exchange(0))
                 call_zone_handler(c, "_Z15TouchZone_PauseP9TouchZonebffP10RepairModePbff", ZONE_PAUSE, bool_ptr,
@@ -183,7 +279,7 @@ void touch_control_update_hook(Cpu& c) {
     const u32 self = c.r(0);
     const u32 mode_addr = lib_base() + kControllerMode;
     const u32 saved = mem::r32(mode_addr);
-    if (g_active) mem::w32(mode_addr, 1);
+    if (g_active && !g_in_replay) mem::w32(mode_addr, 1);
     c.call(g_touch_control_update_orig, {self});
     mem::w32(mode_addr, saved);
 }
@@ -264,7 +360,8 @@ void update() {
         return;
     }
     g_active = true;
-    float steer = deadzone(axis(SDL_CONTROLLER_AXIS_LEFTX), 0.12f);
+    if (g_in_replay) android::set_accelerometer(0, 0, 9.80665f);
+    float steer = deadzone(axis(SDL_CONTROLLER_AXIS_LEFTX), g_steer_deadzone / 100.0f);
     if (steer == 0) {  // D-pad as digital steering
         if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT)) steer = -1;
         if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) steer = 1;
@@ -273,7 +370,7 @@ void update() {
                      deadzone(axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT), 0.05f);
     g_steer = steer;
     g_throttle = throttle;
-    feed_accelerometer(steer, throttle);
+    if (!g_in_replay) feed_accelerometer(steer, throttle);
     if (!g_look_simulated) {
         g_look_x = deadzone(axis(SDL_CONTROLLER_AXIS_RIGHTX), 0.15f);
         g_look_y = deadzone(axis(SDL_CONTROLLER_AXIS_RIGHTY), 0.15f);
@@ -296,9 +393,12 @@ void update() {
     g_handbrake = handbrake && !is_paused();
 }
 
-void on_game_frame(Cpu&) {
+void on_game_frame(Cpu& c) {
     u32 base = lib_base();
     if (!base) return;
+    sync_deadzone_property(c, base);
+    static const u32 in_replay = sym("_Z15AR_InReplayModev");
+    g_in_replay = platform::in_race() && in_replay && (c.call(in_replay, {}) & 0xFF) != 0;
     u32 steer_mode = base + kInputState + kSteerModeOff;
     u32 throttle_mode = base + kInputState + kThrottleModeOff;
     if (g_active) {

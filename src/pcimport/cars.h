@@ -24,10 +24,13 @@ struct Install {
 
 // ---- carconv ------------------------------------------------------------------------------
 // Converts the PC car described by CARS/<car_txt> (searched in data_dirs, in order) into an Android
-// vehicle folder. template_dir: an Android vehicle whose CAR.TXT (physics) is used; mtl_template: a
-// one-texture Android material.
+// vehicle folder. template_dir: an Android vehicle whose CAR.TXT is used; physics_dir: one whose CAR.TXT
+// [DYNAMICS] (handling, collision shape) replaces the template's; mtl_template: a one-texture material.
+// cover_wheels: the collision shape is widened and lengthened to take in the tyres (huge wheels that would
+// otherwise run over pedestrians without touching them).
 void convert_car(Install& inst, const std::vector<fs::path>& data_dirs, const std::string& car_txt,
-                 const fs::path& out_dir, const fs::path& template_dir, const Bytes& mtl_template);
+                 const fs::path& out_dir, const fs::path& template_dir, const fs::path& physics_dir, const Bytes& mtl_template,
+                 const Bytes& car_mtl_template, bool cover_wheels = false);
 
 // ---- pictures and damage HUD ----------------------------------------------------------------
 struct CarTri {
@@ -59,6 +62,10 @@ void set_text_xml(Install& inst, const fs::path& path, const std::string& key, c
                   const std::string& template_key);
 void copy_driver_pictures(Install& inst, const fs::path& content, const std::string& source, const std::string& name);
 int copy_placeholders(Install& inst, const fs::path& content, const std::string& name, const std::string& tmpl);
+
+// ---- controls screen ------------------------------------------------------------------------------
+// Adds the steering deadzone slider to the controls options screen. Returns the layouts rewritten.
+int install_controls_screen(Install& inst);
 
 // ---- Splat Pack --------------------------------------------------------------------------------
 // Converts the Splat Pack cars the Android game lacks and adds them to the roster and opponents.

@@ -27,6 +27,17 @@ startup and other versions are rejected (`--skip-version-check` overrides this, 
 Prebuilt Windows builds are on the [Releases page](https://github.com/kitaaaaaa/carmadroid-x86/releases).
 Every push to `main` is also built automatically (see the Actions tab for the latest build artifact).
 
+### What's new in 0.4.0
+
+- **Steering deadzone slider** on the controls options screen (0-50%), for the gamepad's steering. Needs the
+  unpacked game data (`--extract-data`).
+- **Splat Pack cars handle like their stock counterparts:** each one takes the handling and collision shape of
+  the stock car nearest to it in size (the Monster Masher: the Twister's, scaled up), so they no longer sink
+  into the road. The Monster Masher is back.
+- **Car reflections** on the Splat Pack cars, and the striped reflections on AMD/ATI graphics are fixed.
+- **Action replay from the D-pad** now shows its playback controls and no longer rewinds endlessly.
+- **"WASTED" messages** for the Splat Pack drivers.
+
 ### What's new in 0.3.0
 
 - **Splat Pack cars (optional).** With the PC game's `CARMA` and `CARSPLAT` folders, the game converts the

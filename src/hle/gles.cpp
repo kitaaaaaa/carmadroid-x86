@@ -4,7 +4,10 @@
 #include "hle_common.h"
 #include <windows.h>
 #include <GL/gl.h>
+#include <map>
 #include <mutex>
+#include <tuple>
+#include <vector>
 
 #ifndef APIENTRY
 #define APIENTRY __stdcall
@@ -28,6 +31,8 @@ using PFN_BufferSubData = void(APIENTRY*)(GLenum, ptrdiff_t, ptrdiff_t, const vo
 using PFN_GenBuffers = void(APIENTRY*)(GLsizei, GLuint*);
 using PFN_DeleteBuffers = void(APIENTRY*)(GLsizei, const GLuint*);
 using PFN_BlendEquation = void(APIENTRY*)(GLenum);
+using PFN_GetBufferSubData = void(APIENTRY*)(GLenum, ptrdiff_t, ptrdiff_t, void*);
+using PFN_GetBufferParameteriv = void(APIENTRY*)(GLenum, GLenum, GLint*);
 
 PFN_ActiveTexture pActiveTexture;
 PFN_ClientActiveTexture pClientActiveTexture;
@@ -38,6 +43,8 @@ PFN_BufferSubData pBufferSubData;
 PFN_GenBuffers pGenBuffers;
 PFN_DeleteBuffers pDeleteBuffers;
 PFN_BlendEquation pBlendEquation;
+PFN_GetBufferSubData pGetBufferSubData;
+PFN_GetBufferParameteriv pGetBufferParameteriv;
 
 std::once_flag g_load_once;
 void load_procs() {
@@ -51,11 +58,52 @@ void load_procs() {
         pGenBuffers = (PFN_GenBuffers)platform::gl_proc("glGenBuffers");
         pDeleteBuffers = (PFN_DeleteBuffers)platform::gl_proc("glDeleteBuffers");
         pBlendEquation = (PFN_BlendEquation)platform::gl_proc("glBlendEquation");
+        pGetBufferSubData = (PFN_GetBufferSubData)platform::gl_proc("glGetBufferSubData");
+        pGetBufferParameteriv = (PFN_GetBufferParameteriv)platform::gl_proc("glGetBufferParameteriv");
         if (!pBindBuffer || !pCompressedTexImage2D) fatal("OpenGL 1.5 entry points missing");
     });
 }
 
 GLuint g_array_buffer = 0, g_element_buffer = 0;
+
+// GLES 1.1 allows GL_BYTE texture coordinates; desktop GL doesn't (NVIDIA rejects them, AMD misreads
+// them). The game's car reflections pass normals as byte texture coordinates (scaled by the texture
+// matrix), so those are converted to GL_SHORT (same values) in a companion buffer, rebuilt when the
+// game changes the source buffer.
+constexpr GLenum GL_BUFFER_SIZE_ = 0x8764;
+std::map<GLuint, u32> g_buffer_gen;  // bumped on every data upload
+struct ShortCopy {
+    GLuint vbo;
+    u32 gen;
+};
+std::map<std::tuple<GLuint, u32, u32, u32>, ShortCopy> g_short_copies;  // (buffer, offset, stride, size)
+
+void byte_texcoords_from_buffer(GLint size, GLsizei stride, u32 offset) {
+    const u32 st = stride ? (u32)stride : (u32)size;
+    GLint total = 0;
+    pGetBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_SIZE_, &total);
+    if (!pGetBufferSubData || total <= 0 || offset + (u32)size > (u32)total) return;
+    const u32 gen = g_buffer_gen[g_array_buffer];
+    auto key = std::make_tuple(g_array_buffer, offset, st, (u32)size);
+    auto it = g_short_copies.find(key);
+    if (it == g_short_copies.end() || it->second.gen != gen) {
+        const u32 n = (u32)((total - offset - size) / st + 1);
+        std::vector<int8_t> src((size_t)total);
+        pGetBufferSubData(GL_ARRAY_BUFFER, 0, total, src.data());
+        std::vector<GLshort> dst((size_t)n * size);
+        for (u32 v = 0; v < n; v++)
+            for (int k = 0; k < size; k++) dst[(size_t)v * size + k] = src[offset + (size_t)v * st + k];
+        GLuint vbo = it != g_short_copies.end() ? it->second.vbo : 0;
+        if (!vbo) pGenBuffers(1, &vbo);
+        pBindBuffer(GL_ARRAY_BUFFER, vbo);
+        pBufferData(GL_ARRAY_BUFFER, (ptrdiff_t)(dst.size() * sizeof(GLshort)), dst.data(), 0x88E4 /*STATIC_DRAW*/);
+        pBindBuffer(GL_ARRAY_BUFFER, g_array_buffer);
+        it = g_short_copies.insert_or_assign(key, ShortCopy{vbo, gen}).first;
+    }
+    pBindBuffer(GL_ARRAY_BUFFER, it->second.vbo);
+    glTexCoordPointer(size, GL_SHORT, 0, nullptr);
+    pBindBuffer(GL_ARRAY_BUFFER, g_array_buffer);
+}
 
 float F(Cpu& c, int i) { u32 v = c.r(i); float f; memcpy(&f, &v, 4); return f; }
 float Fa(Cpu& c, int i) { u32 v = c.arg(i); float f; memcpy(&f, &v, 4); return f; }
@@ -205,6 +253,15 @@ HLE(glDeleteBuffers) {
     for (u32 i = 0; i < c.r(0); i++) {
         if (ids[i] == g_array_buffer) g_array_buffer = 0;
         if (ids[i] == g_element_buffer) g_element_buffer = 0;
+        g_buffer_gen.erase(ids[i]);
+        for (auto it = g_short_copies.begin(); it != g_short_copies.end();) {
+            if (std::get<0>(it->first) == ids[i]) {
+                pDeleteBuffers(1, &it->second.vbo);
+                it = g_short_copies.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
     pDeleteBuffers((GLsizei)c.r(0), ids);
 }
@@ -214,13 +271,32 @@ HLE(glBindBuffer) {
     else if (c.r(0) == GL_ELEMENT_ARRAY_BUFFER) g_element_buffer = c.r(1);
     pBindBuffer(c.r(0), c.r(1));
 }
-HLE(glBufferData) { load_procs(); pBufferData(c.r(0), (s32)c.r(1), mem::ptr(c.r(2)), c.r(3)); }
-HLE(glBufferSubData) { load_procs(); pBufferSubData(c.r(0), (s32)c.r(1), (s32)c.r(2), mem::ptr(c.r(3))); }
+HLE(glBufferData) {
+    load_procs();
+    g_buffer_gen[c.r(0) == GL_ARRAY_BUFFER ? g_array_buffer : g_element_buffer]++;
+    pBufferData(c.r(0), (s32)c.r(1), mem::ptr(c.r(2)), c.r(3)); }
+HLE(glBufferSubData) {
+    load_procs();
+    g_buffer_gen[c.r(0) == GL_ARRAY_BUFFER ? g_array_buffer : g_element_buffer]++;
+    pBufferSubData(c.r(0), (s32)c.r(1), (s32)c.r(2), mem::ptr(c.r(3))); }
 
 // --- vertex arrays + drawing ----------------------------------------------
 HLE(glVertexPointer) { glVertexPointer((GLint)c.r(0), c.r(1), (GLsizei)c.r(2), attrib_ptr(c.r(3))); }
 HLE(glColorPointer) { glColorPointer((GLint)c.r(0), c.r(1), (GLsizei)c.r(2), attrib_ptr(c.r(3))); }
-HLE(glTexCoordPointer) { glTexCoordPointer((GLint)c.r(0), c.r(1), (GLsizei)c.r(2), attrib_ptr(c.r(3))); }
+HLE(glTexCoordPointer) {
+    if (c.r(1) == GL_BYTE) {
+        load_procs();
+        if (g_array_buffer) {
+            byte_texcoords_from_buffer((GLint)c.r(0), (GLsizei)c.r(2), c.r(3));
+        } else {
+            static bool warned = false;
+            if (!warned) LOGE("glTexCoordPointer: GL_BYTE from client memory not supported");
+            warned = true;
+        }
+        return;
+    }
+    glTexCoordPointer((GLint)c.r(0), c.r(1), (GLsizei)c.r(2), attrib_ptr(c.r(3)));
+}
 HLE(glNormalPointer) { glNormalPointer(c.r(0), (GLsizei)c.r(1), attrib_ptr(c.r(2))); }
 HLE(glDrawArrays) { glDrawArrays(c.r(0), (GLint)c.r(1), (GLsizei)c.r(2)); }
 HLE(glDrawElements) { glDrawElements(c.r(0), (GLsizei)c.r(1), c.r(2), index_ptr(c.r(3))); }

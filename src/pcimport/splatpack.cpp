@@ -53,9 +53,20 @@ const std::pair<const char*, const char*> kCars[] = {
     {"SEMI", "RIG O'MORTIS"}, {"SLED", "THE SLED"}, {"SPAGHETI", "STILETTO"}, {"SUBFRAME", "KILLER COOP"},
     {"TOOHORSE", "PIECE MAKER"}, {"V6SHAME", "KILLER KITTY"}, {"VLAD2", "ANNIHILATOR II"},
 };
-// Not installed for now: the Monster Masher's huge wheels don't work with the Android physics (its wheel
-// mounts end up below the road and it rides on its body).
-const std::set<std::string> kDisabled = {"MONSTER"};
+// The stock car each one takes its handling and collision shape from: the nearest in body length,
+// width and height, wheelbase, track and wheel size (the Eagle II: the Eagle; the Monster Masher: the Twister,
+// the big-wheeled truck whose box reaches down between its wheels).
+const std::map<std::string, std::string> kCounterpart = {
+    {"333", "KUTTER"},    {"BUGGIT", "GRIMM"},     {"DOOZER", "FIRE"},     {"JAQUES", "OTIS"},
+    {"JEEPY", "APC"},     {"MONSTER", "SCREWIE"},     {"MUSCLE", "AGENTO"},   {"NEWANNIE", "ANNIECAR"},
+    {"NEWEAGLE", "BLKEAGLE"}, {"PARAMED", "BIGAPC"}, {"PORK", "STIG"},     {"ROADHOG", "TARTLET"},
+    {"SEMI", "BIGAPC"},   {"SLED", "BIGAPC"},      {"SPAGHETI", "TASHITA"}, {"SUBFRAME", "VALHELLA"},
+    {"TOOHORSE", "EDHUNT"}, {"V6SHAME", "KUTTER"}, {"VLAD2", "VLAD"},
+};
+const std::set<std::string> kDisabled = {};  // cars not installed
+// Cars whose collision shape is widened to take in their tyres (the Monster Masher's huge wheels stick out
+// 1.6 m past its body: pedestrians would pass under them untouched).
+const std::set<std::string> kCoverWheels = {"MONSTER"};
 // The Splat Pack's player cars belong to Max Damage and Die Anna: they reuse the Android portraits and text.
 const std::map<std::string, std::pair<std::string, std::string>> kPlayerCars = {
     {"NEWEAGLE", {"BlkEagle", "Max Damage"}}, {"NEWANNIE", {"AnnieCar", "Die Anna"}}};
@@ -139,6 +150,15 @@ std::string py_float(double v) {  // Python's str(float): shortest round-trip fo
     return s;
 }
 
+// The driver's first name: the first word of the name, skipping a leading "THE" (The Ashteroid).
+std::string first_name(const std::string& driver) {
+    std::vector<std::string> words;
+    for (const auto& w : split(trim(driver), ' '))
+        if (!w.empty()) words.push_back(upper(w));
+    if (words.size() > 1 && words[0] == "THE") words.erase(words.begin());
+    return words.empty() ? upper(driver) : words[0];
+}
+
 std::string android_name(const std::string& car) {  // "JAQUES" -> "Jaques", "333" -> "Car333"
     if (isdigit((u8)car[0])) return "Car" + car;
     return car.substr(0, 1) + lower(car.substr(1));
@@ -159,16 +179,14 @@ int install_splat_pack(Install& inst, const fs::path& splat, const fs::path& bas
     const fs::path content = inst.root / "DATA" / "CONTENT";
     const auto opp = read_opponents(splat / "OPPONENT.TXT");
     const Bytes mtl_template = read_file(content / "TRACKS" / "LEVELS" / "CITY_A" / "1GRILLS.MTL");
+    const Bytes car_mtl_template = read_file(content / "VEHICLES" / "BLKEAGLE" / "BLKEAGLE.MTL");
     int installed = 0;
     for (const auto& [car, display] : kCars) {
         if (kDisabled.count(car)) continue;
         const std::string name = android_name(car);
         const fs::path out = content / "VEHICLES" / upper(name);
         try {
-            if (fs::exists(out)) {
-                LOGI("pc import: %s is already in the game, skipped", name.c_str());
-                continue;
-            }
+            if (fs::exists(out)) LOGI("pc import: replacing %s (installed earlier, e.g. by the Python tools)", name.c_str());
             if (count_cars(content / "QUICKRACECARS.TXT") >= kMaxCars) {
                 LOGE("pc import: the car list is full (%d cars), %s not added", kMaxCars, name.c_str());
                 continue;
@@ -176,8 +194,15 @@ int install_splat_pack(Install& inst, const fs::path& splat, const fs::path& bas
             const auto it = opp.find(car);
             const CarInfo info = it != opp.end() ? it->second : CarInfo{};
             const double tons = info.tons ? info.tons : 1.5;
-            const std::string tmpl = tons >= 2.5 ? "Dump" : "BlkEagle";
-            convert_car(inst, {splat, base}, std::string(car) + ".TXT", out, content / "VEHICLES" / upper(tmpl), mtl_template);
+            // Specs (A/P/O), menu placeholders and damage HUD from the Eagle (the Dump if heavy); handling and
+            // collision shape from the stock counterpart.
+            const std::string tmpl = tons >= 2.5 ? "DUMP" : "BLKEAGLE";
+            auto cp = kCounterpart.find(car);
+            std::string phys = cp != kCounterpart.end() ? cp->second : tmpl;
+            if (!fs::exists(content / "VEHICLES" / phys / "CAR.TXT")) phys = tmpl;
+            convert_car(inst, {splat, base}, std::string(car) + ".TXT", out, content / "VEHICLES" / upper(tmpl),
+                        content / "VEHICLES" / phys, mtl_template,
+                        car_mtl_template, kCoverWheels.count(car) != 0);
 
             // roster, specs, opponents, texts
             int strength = info.strength;
@@ -199,8 +224,8 @@ int install_splat_pack(Install& inst, const fs::path& splat, const fs::path& bas
             set_text_txt(inst, content / "TEXT.TXT", "CAR_" + up, upper(display));
             set_text_txt(inst, content / "TEXT.TXT", up + "_DRIVER", upper(driver));
             const std::string disp = upper(display), drv = upper(driver);
-            set_text_xml(inst, content / "TEXT" / "TEXT.XML", "CAR_" + up, &disp, "CAR_" + upper(tmpl));
-            set_text_xml(inst, content / "TEXT" / "TEXT.XML", up + "_DRIVER", &drv, upper(tmpl) + "_DRIVER");
+            set_text_xml(inst, content / "TEXT" / "TEXT.XML", "CAR_" + up, &disp, "CAR_BLKEAGLE");  // (row layout only)
+            set_text_xml(inst, content / "TEXT" / "TEXT.XML", up + "_DRIVER", &drv, "BLKEAGLE_DRIVER");
             copy_placeholders(inst, content, name, tmpl);
 
             // pictures, damage HUD, description
@@ -208,6 +233,12 @@ int install_splat_pack(Install& inst, const fs::path& splat, const fs::path& bas
             const fs::path mug = player == kPlayerCars.end() && !info.mug.empty() ? splat / "ANIM" / info.mug : fs::path();
             make_pictures(inst, content, name, *model, mug);
             make_damage_hud(inst, content, name, *model);
+            // "<driver's first name> WASTED"
+            {
+                const std::string first = car == std::string("NEWANNIE") ? "ANNA" : first_name(driver);  // (Die Anna)
+                const std::string wasted = first + " WASTED";  // (English in every language)
+                set_text_xml(inst, content / "TEXT" / "TEXT.XML", up + "_SHORT", &wasted, "BLKEAGLE_SHORT");
+            }
             if (player != kPlayerCars.end()) {
                 copy_driver_pictures(inst, content, player->second.first, name);
                 set_text_xml(inst, content / "TEXT" / "TEXT.XML", up + "_INFO", nullptr, upper(player->second.first) + "_INFO");

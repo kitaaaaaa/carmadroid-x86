@@ -18,6 +18,28 @@ CARS = {  # display names from the CWA wiki's list of Carmageddon vehicles (matc
 
 PLAYER_CARS = {'NEWEAGLE': 'BlkEagle', 'NEWANNIE': 'AnnieCar'}
 
+# The stock car each one takes its handling and collision shape from: the nearest in body length,
+# width and height, wheelbase, track and wheel size (the Eagle II: the Eagle; the Monster Masher: the Twister,
+# the big-wheeled truck whose box reaches down between its wheels).
+COUNTERPART = {
+    '333': 'KUTTER', 'BUGGIT': 'GRIMM', 'DOOZER': 'FIRE', 'JAQUES': 'OTIS', 'JEEPY': 'APC', 'MONSTER': 'SCREWIE',
+    'MUSCLE': 'AGENTO', 'NEWANNIE': 'ANNIECAR', 'NEWEAGLE': 'BLKEAGLE', 'PARAMED': 'BIGAPC', 'PORK': 'STIG',
+    'ROADHOG': 'TARTLET', 'SEMI': 'BIGAPC', 'SLED': 'BIGAPC', 'SPAGHETI': 'TASHITA', 'SUBFRAME': 'VALHELLA',
+    'TOOHORSE': 'EDHUNT', 'V6SHAME': 'KUTTER', 'VLAD2': 'VLAD',
+}
+DISABLED = set()  # cars not installed
+# Cars whose collision shape is widened to take in their tyres (the Monster Masher's huge wheels stick out
+# 1.6 m past its body: pedestrians would pass under them untouched).
+COVER_WHEELS = {'MONSTER'}
+
+
+def first_name(driver):
+    """The driver's first name: the first word of the name, skipping a leading "THE" (The Ashteroid)."""
+    words = driver.upper().split()
+    if len(words) > 1 and words[0] == 'THE':
+        words = words[1:]
+    return words[0] if words else driver.upper()
+
 
 def opponents(splat_data):
     """car file -> dict(driver, strength, mph, tons, sixty) from OPPONENT.TXT."""
@@ -71,20 +93,25 @@ def main():
     base = os.path.join(a.install, 'CARMA', 'DATA')
     content = os.path.join(a.game_dir, 'DATA', 'CONTENT')
     opp = opponents(splat)
-    cars = [c for c in CARS if not a.only or c in a.only.upper().split(',')]
+    cars = [c for c in CARS if c not in DISABLED and (not a.only or c in a.only.upper().split(','))]
     ok = []
     for car in cars:
         out = os.path.join(a.work, car)
         info = opp.get(car, {})
         tons = info.get('tons', 1.5)
+        # Specs (A/P/O), menu placeholders and damage HUD from the Eagle (the Dump if heavy); handling and
+        # collision shape from the stock counterpart.
         template = 'Dump' if tons >= 2.5 else 'BlkEagle'
         tdir = os.path.join(content, 'VEHICLES', template.upper())
+        pdir = os.path.join(content, 'VEHICLES', COUNTERPART.get(car, template).upper())
         try:
             if os.path.exists(out):
                 import shutil
                 shutil.rmtree(out)
             carconv.convert([splat, base], car + '.TXT', out, tdir,
-                            os.path.join(content, 'TRACKS', 'LEVELS', 'CITY_A', '1GRILLS.MTL'))
+                            os.path.join(content, 'TRACKS', 'LEVELS', 'CITY_A', '1GRILLS.MTL'),
+                            os.path.join(content, 'VEHICLES', 'BLKEAGLE', 'BLKEAGLE.MTL'), pdir,
+                            car in COVER_WHEELS)
         except Exception as e:
             print('!! %s failed: %s' % (car, e))
             traceback.print_exc(limit=3)
@@ -117,6 +144,10 @@ def main():
         player = PLAYER_CARS.get(car)
         uiimg.make_pictures(a.game_dir, name, os.path.join(a.work, car), None if player else mug)
         damagehud.make_damage_hud(a.game_dir, name, os.path.join(a.work, car))
+        # "<driver's first name> WASTED"
+        text_xml = os.path.join(content, 'TEXT', 'TEXT.XML')
+        first = 'ANNA' if car == 'NEWANNIE' else first_name({'NEWEAGLE': 'Max Damage'}.get(car) or info.get('driver') or name)
+        addcar.set_text_xml(text_xml, name.upper() + '_SHORT', first + ' WASTED', 'BLKEAGLE_SHORT')  # (English only)
         if player:
             addcar.copy_driver_pictures(content, player, name)
             addcar.set_text_xml(os.path.join(content, 'TEXT', 'TEXT.XML'), name.upper() + '_INFO', None,

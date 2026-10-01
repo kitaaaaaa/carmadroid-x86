@@ -13,11 +13,7 @@ constexpr double kScale = 6.9;  // C1 world units -> metres (dethrace WORLD_SCAL
 const std::map<std::string, std::string> kWheels = {
     {"FLWHEEL.ACT", "whlFL"}, {"FRWHEEL.ACT", "whlFR"}, {"RLWHEEL.ACT", "whlRL"}, {"RRWHEEL.ACT", "whlRR"}};
 
-// Every car's wheels hang from mounts 0.2 m above the car's base, near the tyres' outer edges, with only
-// 0.27 m of travel (the wheel radius doesn't change that). If the body is higher than the stock cars'
-// (0.35 m at most), landing, rolling in a turn or hitting a kerb pushes mounts below the road, the
-// wheels lose the ground and the car sits on its body.
-constexpr double kLowestBody = 0.35;
+constexpr double kShine = 0.35;  // shine mask brightness relative to the texture (stock masks average ~13-45/255)
 
 using M12 = std::array<double, 12>;
 
@@ -303,37 +299,11 @@ std::string fmt_f(double v) {
     return b;
 }
 
-// Collision shape for CAR.TXT: a box around the body. A body higher than kLowestBody gets a base below
-// it at kLowestBody, as wide as the tyres' outer edges and reaching half a wheel radius past the axles,
-// so it meets the road before any wheel mount can. wheels: (x, z, half width, radius) each.
-std::string shape_text(const V3& lo, const V3& hi, const std::vector<std::array<double, 4>>& wheels) {
-    if (lo[1] <= kLowestBody)
-        return "(default label)\n1\nRoundedAlignedCuboid\n0.15\n" + fmt_f(lo[0]) + "," + fmt_f(std::max(lo[1], 0.2)) +
-               "," + fmt_f(lo[2]) + "\n" + fmt_f(hi[0]) + "," + fmt_f(hi[1]) + "," + fmt_f(hi[2]) + "\n";
-    std::vector<V3> pts;
-    for (double x : {lo[0], hi[0]})
-        for (double y : {lo[1], hi[1]})
-            for (double z : {lo[2], hi[2]}) pts.push_back({x, y, z});
-    if (!wheels.empty()) {
-        double mid = 0;
-        for (const auto& w : wheels) mid += w[1];
-        mid /= wheels.size();
-        for (const auto& w : wheels)
-            pts.push_back({w[0] + (w[0] > 0 ? w[2] : -w[2]), kLowestBody, w[1] + (w[1] > mid ? w[3] : -w[3]) * 0.5});
-    } else {
-        const double cx = (lo[0] + hi[0]) / 2, cz = (lo[2] + hi[2]) / 2, hx = (hi[0] - lo[0]) / 2, hz = (hi[2] - lo[2]) / 2;
-        for (int sx : {-1, 1})
-            for (int sz : {-1, 1}) pts.push_back({cx + sx * hx, kLowestBody, cz + sz * hz * 0.6});
-    }
-    std::string s = "(default label)\n1\nRoundedPolyhedron\n0.150000\n" + std::to_string(pts.size()) + "\n";
-    for (const auto& q : pts) s += fmt_f(q[0]) + "," + fmt_f(q[1]) + "," + fmt_f(q[2]) + "\n";
-    return s + "\nform_collision_groups\n1\n";
-}
-
 }  // namespace
 
 void convert_car(Install& inst, const std::vector<fs::path>& data_dirs, const std::string& car_txt,
-                 const fs::path& out_dir, const fs::path& template_dir, const Bytes& mtl_template) {
+                 const fs::path& out_dir, const fs::path& template_dir, const fs::path& physics_dir,
+                 const Bytes& mtl_template, const Bytes& car_mtl_template, bool cover_wheels) {
     const auto lines = c1_data_lines(find(data_dirs, "CARS", car_txt));
     if (lines.empty()) throw std::runtime_error(car_txt + " is empty");
     std::string car = upper(split(trim(lines[0]), ' ')[0]);
@@ -424,7 +394,6 @@ void convert_car(Install& inst, const std::vector<fs::path>& data_dirs, const st
     }
     Mesh body{{}, &two_sided, &inset};
     std::map<std::string, std::pair<M12, Mesh>> wheels;  // Android node name -> (world matrix, mesh)
-    std::vector<std::string> wheel_order;
 
     std::function<void(const BrActor&, const M12&, const std::string&)> visit =
         [&](const BrActor& actor, const M12& parent_m, const std::string& inherited_mat) {
@@ -440,7 +409,6 @@ void convert_car(Install& inst, const std::vector<fs::path>& data_dirs, const st
                         M12 rot = m;
                         rot[9] = rot[10] = rot[11] = 0;
                         mesh.add_model(mi->second, rot, mat_name, def);
-                        if (!wheels.count(wheel->second)) wheel_order.push_back(wheel->second);
                         wheels[wheel->second] = {m, std::move(mesh)};
                     } else {
                         body.add_model(mi->second, m, mat_name, def);
@@ -492,21 +460,53 @@ void convert_car(Install& inst, const std::vector<fs::path>& data_dirs, const st
         bleed(tex);
         // Solid textures: one uncompressed plane (drawn opaque). See-through ones: RLE planes with the
         // one-bit-alpha flag, as the game's own see-through textures.
-        inst.write(out_dir / (upper(name) + ".IMG"), has_transparency(tex) ? img_rle(tex, 0x06) : img_plain(tex));
-        inst.write(out_dir / (upper(name) + ".MTL"), mtl_with_texture(mtl_template, name));
+        if (has_transparency(tex)) {
+            inst.write(out_dir / (upper(name) + ".IMG"), img_rle(tex, 0x06));
+            inst.write(out_dir / (upper(name) + ".MTL"), mtl_with_texture(mtl_template, name));
+        } else {
+            inst.write(out_dir / (upper(name) + ".IMG"), img_plain(tex));
+            // Reflection of the track's environment map, as on the game's own cars. Their shine masks look
+            // like their skins darkened (brighter on metal) and are smooth; this one is the texture at kShine,
+            // averaged down to a quarter size (the PC textures' dithering would sparkle in the reflection).
+            Rgba mask = resize(tex, std::max(1, tex.w / 4), std::max(1, tex.h / 4));
+            for (size_t k = 0; k < mask.px.size(); k += 4)
+                for (int c = 0; c < 3; c++) mask.px[k + c] = (u8)(mask.px[k + c] * kShine);
+            inst.write(out_dir / (upper(name) + "_S.IMG"), img_plain(mask));
+            inst.write(out_dir / (upper(name) + ".MTL"), mtl_with_reflection(mtl_template, car_mtl_template, name));
+        }
     }
 
-    // CAR.TXT from the template car, with the collision shape from the new body. The checksum after it
-    // is set to -1 (as in cars whose shapes were edited by hand), since the shape changed.
-    const Bytes tb = read_file(template_dir / "CAR.TXT");
-    std::string txt;
-    for (size_t k = 0; k < tb.size(); k++) {
-        if (tb[k] == '\r') {
-            txt += '\n';
-            if (k + 1 < tb.size() && tb[k + 1] == '\n') k++;
-        } else {
-            txt += (char)tb[k];
+    // CAR.TXT from the template car, with the [DYNAMICS] section (handling and collision shape) of the
+    // physics car. Its shape's points are stretched from that car's body to the new one: across and along the
+    // car, and upwards from the shape's own lowest point (so it keeps the clearance above the wheel mounts).
+    // The checksum after the shape is set to -1 (as in cars whose shapes were edited by hand).
+    auto read_text = [](const fs::path& p) {
+        const Bytes tb = read_file(p);
+        std::string t;
+        for (size_t k = 0; k < tb.size(); k++) {
+            if (tb[k] == '\r') {
+                t += '\n';
+                if (k + 1 < tb.size() && tb[k + 1] == '\n') k++;
+            } else {
+                t += (char)tb[k];
+            }
         }
+        return t;
+    };
+    // [DYNAMICS] up to the next section
+    auto dynamics = [](const std::string& t, size_t& from, size_t& to) {
+        from = t.find("[DYNAMICS]");
+        if (from == std::string::npos) return false;
+        to = t.find("\n[", from);
+        to = to == std::string::npos ? t.size() : to + 1;
+        return true;
+    };
+    std::string txt = read_text(template_dir / "CAR.TXT");
+    if (physics_dir != template_dir) {
+        const std::string phys = read_text(physics_dir / "CAR.TXT");
+        size_t f0, t0, f1, t1;
+        if (!dynamics(txt, f0, t0) || !dynamics(phys, f1, t1)) throw std::runtime_error("CAR.TXT without [DYNAMICS]");
+        txt = txt.substr(0, f0) + phys.substr(f1, t1 - f1) + txt.substr(t0);
     }
     const size_t a = txt.find("<Shape>"), b = txt.find("<ShapeCheckSum>");
     if (a == std::string::npos || b == std::string::npos) throw std::runtime_error("template CAR.TXT has no <Shape>");
@@ -514,15 +514,77 @@ void convert_car(Install& inst, const std::vector<fs::path>& data_dirs, const st
     if (e == std::string::npos) e = txt.size();
     V3 lo, hi;
     body.bounds(lo, hi);
-    std::vector<std::array<double, 4>> wheel_spots;
-    for (const auto& name : wheel_order) {
-        const auto& [m, mesh] = wheels[name];
-        const V3 pos = to_android({m[9], m[10], m[11]});
-        V3 wlo, whi;
-        mesh.bounds(wlo, whi);
-        wheel_spots.push_back({pos[0], pos[2], (whi[0] - wlo[0]) / 2, (whi[1] - wlo[1]) / 2});
+    const Mdl tbody = read_mdl(read_file(physics_dir / "CARBODY.MDL"));
+    std::vector<std::string> shape = split(txt.substr(a, b - a), '\n');
+    if (!shape.empty() && shape.back().empty()) shape.pop_back();
+    auto point = [](const std::string& l, V3& p) {
+        const auto f = split(l, ',');
+        if (f.size() != 3) return false;
+        try {
+            for (int k = 0; k < 3; k++) {
+                size_t used = 0;
+                p[k] = std::stod(trim(f[k]), &used);
+                if (used != trim(f[k]).size()) return false;
+            }
+        } catch (const std::exception&) {
+            return false;
+        }
+        return true;
+    };
+    double floor_y = 1e30;
+    for (const auto& l : shape) {
+        V3 p;
+        if (point(l, p)) floor_y = std::min(floor_y, p[1]);
     }
-    txt = txt.substr(0, a) + "<Shape>\n" + shape_text(lo, hi, wheel_spots) + "\n\n<ShapeCheckSum>\n-1" + txt.substr(e);
+    if (floor_y > 1e29) throw std::runtime_error("template CAR.TXT has no shape points");
+    const double sx = (hi[0] - lo[0]) / (tbody.bmax[0] - tbody.bmin[0]);
+    const double sz = (hi[2] - lo[2]) / (tbody.bmax[2] - tbody.bmin[2]);
+    const double sy = (hi[1] - floor_y) / std::max(0.1, tbody.bmax[1] - floor_y);
+    std::vector<V3> pts;
+    std::vector<bool> solid;  // the point belongs to a Rounded* form (not a wireframe)
+    bool in_solid = false;
+    for (const auto& l : shape) {
+        V3 p;
+        if (l.rfind("Rounded", 0) == 0) in_solid = true;
+        else if (l.rfind("wireframe", 0) == 0) in_solid = false;
+        if (point(l, p)) {
+            pts.push_back({p[0] * sx, floor_y + (p[1] - floor_y) * sy, lo[2] + (p[2] - tbody.bmin[2]) * sz});
+            solid.push_back(in_solid);
+        }
+    }
+    if (cover_wheels && !wheels.empty()) {
+        // Out to the tyres' outer edges, and from the back of the rear tyres to the front of the front ones.
+        double tx = 0, tz0 = 1e30, tz1 = -1e30, x = 0, z0 = 1e30, z1 = -1e30;
+        for (const auto& [name, w] : wheels) {
+            V3 wlo, whi;
+            w.second.bounds(wlo, whi);
+            const V3 pos = to_android({w.first[9], w.first[10], w.first[11]});
+            tx = std::max(tx, std::fabs(pos[0]) + (whi[0] - wlo[0]) / 2);
+            tz0 = std::min(tz0, pos[2] + wlo[2]);
+            tz1 = std::max(tz1, pos[2] + whi[2]);
+        }
+        for (size_t i = 0; i < pts.size(); i++)
+            if (solid[i]) x = std::max(x, std::fabs(pts[i][0])), z0 = std::min(z0, pts[i][2]), z1 = std::max(z1, pts[i][2]);
+        const double fx = x > 0 ? std::max(1.0, tx / x) : 1.0;
+        const double nz0 = std::min(z0, tz0), nz1 = std::max(z1, tz1);
+        for (size_t i = 0; i < pts.size(); i++) {
+            if (!solid[i]) continue;  // (the wireframe keeps its place)
+            pts[i][0] *= fx;
+            if (z1 > z0) pts[i][2] = nz0 + (pts[i][2] - z0) * (nz1 - nz0) / (z1 - z0);
+        }
+    }
+    std::string new_shape;
+    size_t k = 0;
+    for (const auto& l : shape) {
+        V3 p;
+        if (point(l, p)) {
+            const V3& q = pts[k++];
+            new_shape += fmt_f(q[0]) + "," + fmt_f(q[1]) + "," + fmt_f(q[2]) + "\n";
+        } else {
+            new_shape += l + "\n";
+        }
+    }
+    txt = txt.substr(0, a) + new_shape + "<ShapeCheckSum>\n-1" + txt.substr(e);
     inst.write(out_dir / "CAR.TXT", txt);
 }
 

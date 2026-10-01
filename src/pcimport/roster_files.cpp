@@ -150,8 +150,9 @@ void set_text_txt(Install& inst, const fs::path& path, const std::string& key, c
 
 // TEXT.XML is a spreadsheet: one <Row> per key, a cell per language. A new key's row is a copy of the
 // template key's (cell 0: the key, cells 2+: the text in each language).
-void set_text_xml(Install& inst, const fs::path& path, const std::string& key, const std::string* value_latin1,
-                  const std::string& template_key) {
+namespace {
+void set_text_xml_impl(Install& inst, const fs::path& path, const std::string& key, const std::string* value_latin1,
+                       const std::string& template_key) {
     const Bytes b = read_file(path);
     std::string s(b.begin(), b.end());
     auto find_row = [&](const std::string& k, size_t& start, size_t& end) {
@@ -195,6 +196,12 @@ void set_text_xml(Install& inst, const fs::path& path, const std::string& key, c
     if (exists) s = s.substr(0, start) + new_row + s.substr(end);
     else s = s.substr(0, end) + "\r\n   " + new_row + s.substr(end);
     inst.write(path, s);
+}
+}  // namespace
+
+void set_text_xml(Install& inst, const fs::path& path, const std::string& key, const std::string* value_latin1,
+                  const std::string& template_key) {
+    set_text_xml_impl(inst, path, key, value_latin1, template_key);
 }
 
 // Copies another car's driver portraits (UI/ASSETS/*/DRIVERS) to this car.

@@ -7,6 +7,7 @@
 //     the opponents.
 //   - Tracks: not yet.
 // The in-car cockpit views ("interiors") are drawn straight from the PC files at run time (pc_content).
+// Also, with or without the PC game: the controls options screen gets a steering deadzone slider.
 //
 // The install is done once and recorded in <game folder>/pcimport: a journal of the files it created
 // and backups of the game files it changed. It is undone and redone when the PC folders or the
@@ -17,7 +18,7 @@
 namespace pc_import {
 
 // carma / carsplat: the PC game's CARMA and CARSPLAT folders (the ones containing DATA); either may be
-// empty. With neither, an earlier install is left as it is.
+// empty. With neither, an earlier install is left as it is (a first install only adds the slider).
 void install(const std::string& game_dir, const std::string& carma, const std::string& carsplat);
 
 // Removes an earlier install: deletes the files it created and restores the game files it changed.

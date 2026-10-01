@@ -832,6 +832,46 @@ Bytes mtl_with_texture(const Bytes& tmpl, const std::string& texture) {
     return w.b;
 }
 
+namespace {
+// MTL layout: 2 header bytes, u32 texture count, per texture: name (pstr) + 30 bytes of stage settings
+// (the first u32 is the stage's use: 0 texture, 1 environment map, 8 shine mask), then 63 bytes.
+struct MtlParts {
+    Bytes head;
+    std::vector<std::pair<std::string, Bytes>> stages;
+    Bytes trailer;
+};
+MtlParts parse_mtl(const Bytes& mtl) {
+    Reader r(mtl);
+    MtlParts m;
+    m.head.assign(mtl.begin(), mtl.begin() + 2);
+    r.take(2);
+    const u32 n = r.u32_();
+    for (u32 i = 0; i < n; i++) {
+        std::string name = r.pstr();
+        const u8* p = r.take(30);
+        m.stages.push_back({name, Bytes(p, p + 30)});
+    }
+    m.trailer.assign(mtl.begin() + r.p, mtl.end());
+    return m;
+}
+}  // namespace
+
+Bytes mtl_with_reflection(const Bytes& tmpl, const Bytes& car_tmpl, const std::string& texture) {
+    const MtlParts one = parse_mtl(tmpl), car = parse_mtl(car_tmpl);
+    if (one.stages.size() != 1 || car.stages.size() != 3) throw std::runtime_error("unexpected material templates");
+    Writer w;
+    w.raw(one.head);
+    w.u32_(3);
+    const std::pair<std::string, const Bytes*> stages[3] = {
+        {texture, &one.stages[0].second}, {"env", &car.stages[1].second}, {texture + "_s", &car.stages[2].second}};
+    for (const auto& [name, settings] : stages) {
+        w.pstr(name);
+        w.raw(*settings);
+    }
+    w.raw(car.trailer);  // the car's lighting settings (with them the game builds its meshes with normals)
+    return w.b;
+}
+
 std::string mtl_texture(const Bytes& mtl) {
     try {
         Reader r(mtl);

@@ -293,8 +293,108 @@ def mtl_bytes(template, texture):
     return bytes(w.b)
 
 
+def parse_mtl(data):
+    """MTL: 2 header bytes, u32 texture count, per texture: name (pstr) + 30 bytes of stage settings (the first
+    u32 is the stage's use: 0 texture, 1 environment map, 8 shine mask), then 63 bytes."""
+    r = st.Reader(data)
+    head = r.take(2)
+    stages = []
+    for _ in range(r.u32()):
+        name = r.pstr()
+        stages.append((name, r.take(30)))
+    return head, stages, data[r.p:]
+
+
+def mtl_with_reflection(template, car_template, texture):
+    """A one-texture material with the game's car reflection: stage 1 "env" (the track's environment map) and
+    stage 2 "<texture>_s" (the shine mask), those stages' settings from a stock car's body material, and the
+    car's lighting settings (with them the game builds the meshes with the normals the reflection uses)."""
+    head, one, _ = parse_mtl(template)
+    _, car, trailer = parse_mtl(car_template)
+    if len(one) != 1 or len(car) != 3:
+        raise ValueError('unexpected material templates')
+    w = st.Writer()
+    w.raw(head)
+    w.u32(3)
+    for name, settings in ((texture, one[0][1]), ('env', car[1][1]), (texture + '_s', car[2][1])):
+        w.pstr(name)
+        w.raw(settings)
+    w.raw(trailer)
+    return bytes(w.b)
+
+
+SHINE = 0.35  # shine mask brightness relative to the texture (the game's own masks average ~13-45/255)
+
+
+def shine_mask(w, h, rgba):
+    """The game's shine masks look like their cars' skins darkened (brighter on metal) and are smooth: the
+    texture at SHINE, averaged down to a quarter size (the PC textures' dithering would sparkle)."""
+    import uiimg
+    mw, mh = max(1, w // 4), max(1, h // 4)
+    m = bytearray(uiimg.resize(w, h, rgba, mw, mh))
+    for i in range(0, len(m), 4):
+        m[i] = int(m[i] * SHINE); m[i + 1] = int(m[i + 1] * SHINE); m[i + 2] = int(m[i + 2] * SHINE)
+    return mw, mh, bytes(m)
+
+
+def stretch_shape(txt, a, b, lo, hi, template_dir, cover=None):
+    """The template's shape block (txt[a:b]) with its points stretched from the template's body to the new
+    one: across and along the car, and upwards from the shape's own lowest point (so it keeps the template's
+    clearance above the wheel mounts)."""
+    tb = st.read_mdl(open(os.path.join(template_dir, 'CARBODY.MDL'), 'rb').read())
+    lines = txt[a:b].split('\n')
+    if lines and lines[-1] == '':
+        lines.pop()
+
+    def point(l):
+        f = l.split(',')
+        if len(f) != 3:
+            return None
+        try:
+            return [float(x) for x in f]
+        except ValueError:
+            return None
+
+    pts = [p for p in (point(l) for l in lines) if p]
+    if not pts:
+        raise ValueError('template CAR.TXT has no shape points')
+    floor_y = min(p[1] for p in pts)
+    sx = (hi[0] - lo[0]) / (tb.bmax[0] - tb.bmin[0])
+    sz = (hi[2] - lo[2]) / (tb.bmax[2] - tb.bmin[2])
+    sy = (hi[1] - floor_y) / max(0.1, tb.bmax[1] - floor_y)
+    new = [[p[0] * sx, floor_y + (p[1] - floor_y) * sy, lo[2] + (p[2] - tb.bmin[2]) * sz] for p in pts]
+    solid, in_solid = [], False  # the point belongs to a Rounded* form (not a wireframe)
+    for l in lines:
+        if l.startswith('Rounded'):
+            in_solid = True
+        elif l.startswith('wireframe'):
+            in_solid = False
+        if point(l):
+            solid.append(in_solid)
+    if cover:  # (tyre outer x, tyre z min, tyre z max): the solid forms out to the tyres' outer edges and ends
+        tx, tz0, tz1 = cover
+        sp = [p for p, s in zip(new, solid) if s]
+        x = max(abs(p[0]) for p in sp)
+        z0, z1 = min(p[2] for p in sp), max(p[2] for p in sp)
+        fx = max(1.0, tx / x) if x > 0 else 1.0
+        nz0, nz1 = min(z0, tz0), max(z1, tz1)
+        for p in sp:
+            p[0] *= fx
+            if z1 > z0:
+                p[2] = nz0 + (p[2] - z0) * (nz1 - nz0) / (z1 - z0)
+    out = []
+    it = iter(new)
+    for l in lines:
+        out.append('%f,%f,%f' % tuple(next(it)) if point(l) else l)
+    return '\n'.join(out) + '\n'
+
+
 # ---------------------------------------------------------------------------------------------
-def convert(data_dirs, car_txt, out_dir, template_dir, mtl_template):
+def convert(data_dirs, car_txt, out_dir, template_dir, mtl_template, car_mtl_template, physics_dir=None,
+            cover_wheels=False):
+    """template_dir: an Android vehicle whose CAR.TXT is used; physics_dir: one whose CAR.TXT [DYNAMICS]
+    (handling, collision shape) replaces the template's (default: the template's own)."""
+    physics_dir = physics_dir or template_dir
     lines = c1text.data_lines(find(data_dirs, 'CARS', car_txt))
     car = lines[0].split()[0].upper().replace('.TXT', '')
     # file lists: find "Number of pixelmap files" etc. by structure: the first list after the grid images
@@ -377,6 +477,7 @@ def convert(data_dirs, car_txt, out_dir, template_dir, mtl_template):
 
     # materials and textures
     tmpl = open(mtl_template, 'rb').read()
+    car_tmpl = open(car_mtl_template, 'rb').read()
     for pc_name, name in used_mats.items():
         m = materials.get(pc_name) or materials.get(pc_name.replace('.MAT', '').upper())
         tex = None
@@ -392,53 +493,41 @@ def convert(data_dirs, car_txt, out_dir, template_dir, mtl_template):
         w, h, rgba = tex
         rgba = bleed(w, h, rgba)
         write_img(os.path.join(out_dir, name.upper() + '.IMG'), w, h, rgba)
-        open(os.path.join(out_dir, name.upper() + '.MTL'), 'wb').write(mtl_bytes(tmpl, name))
+        if any(a < 128 for a in rgba[3::4]):  # see-through: no reflection
+            open(os.path.join(out_dir, name.upper() + '.MTL'), 'wb').write(mtl_bytes(tmpl, name))
+        else:  # reflection of the track's environment map, as on the game's own cars
+            write_img(os.path.join(out_dir, name.upper() + '_S.IMG'), *shine_mask(w, h, rgba))
+            open(os.path.join(out_dir, name.upper() + '.MTL'), 'wb').write(mtl_with_reflection(tmpl, car_tmpl, name))
     print('materials', len(used_mats))
 
-    # CAR.TXT from the template car, with the collision box from the new body
+    # CAR.TXT from the template car (its handling and collision shape), the shape stretched to the new body
     lo, hi = body.bounds()
     txt = open(os.path.join(template_dir, 'CAR.TXT'), encoding='latin1').read()
-    # Replace the template's collision shapes with one box around the new body. The checksum after it
-    # is set to -1 (as in cars whose shapes were edited by hand), since the shape changed.
+    if physics_dir != template_dir:  # [DYNAMICS] (up to the next section) from the physics car
+        phys = open(os.path.join(physics_dir, 'CAR.TXT'), encoding='latin1').read()
+
+        def dynamics(t):
+            f = t.index('[DYNAMICS]')
+            e = t.find('\n[', f)
+            return f, (len(t) if e < 0 else e + 1)
+        f0, t0 = dynamics(txt)
+        f1, t1 = dynamics(phys)
+        txt = txt[:f0] + phys[f1:t1] + txt[t0:]
+    # The checksum after the shape is set to -1 (as in cars whose shapes were edited by hand), since it changed.
     a = txt.index('<Shape>')
     b = txt.index('<ShapeCheckSum>')
     e = txt.index('\n', txt.index('\n', b) + 1)
-    wheel_spots = []
-    for m, mesh in wheels.values():
-        pos = to_android((m[9], m[10], m[11]))
-        wlo, whi = mesh.bounds()
-        wheel_spots.append((pos[0], pos[2], (whi[0] - wlo[0]) / 2, (whi[1] - wlo[1]) / 2))
-    txt = txt[:a] + '<Shape>\n' + shape_text(lo, hi, wheel_spots) + '\n\n<ShapeCheckSum>\n-1' + txt[e:]
+    cover = None
+    if cover_wheels and wheels:  # the shape takes in the tyres (huge wheels would run over peds untouched)
+        spots = []
+        for m, mesh in wheels.values():
+            pos = to_android((m[9], m[10], m[11]))
+            wlo, whi = mesh.bounds()
+            spots.append((abs(pos[0]) + (whi[0] - wlo[0]) / 2, pos[2] + wlo[2], pos[2] + whi[2]))
+        cover = (max(s[0] for s in spots), min(s[1] for s in spots), max(s[2] for s in spots))
+    txt = txt[:a] + stretch_shape(txt, a, b, lo, hi, physics_dir, cover) + '<ShapeCheckSum>\n-1' + txt[e:]
     open(os.path.join(out_dir, 'CAR.TXT'), 'w', encoding='latin1', newline='\n').write(txt)
     print('bounds', [round(x, 2) for x in lo], [round(x, 2) for x in hi])
-
-
-# Every car's wheels hang from mounts 0.2 m above the car's base, near the tyres' outer edges, with
-# only 0.27 m of travel (the wheel radius doesn't change that). If the body is higher than the stock
-# cars' (0.35 m at most), landing, rolling in a turn or hitting a kerb pushes mounts below the road, the
-# wheels lose the ground and the car sits on its body.
-LOWEST_BODY = 0.35
-
-
-def shape_text(lo, hi, wheels=()):
-    """Collision shape for CAR.TXT: a box around the body. A body higher than LOWEST_BODY gets a base
-    below it at LOWEST_BODY, as wide as the tyres' outer edges and reaching half a wheel radius past the
-    axles, so it meets the road before any wheel mount can. wheels: (x, z, half width, radius) each."""
-    lowest = LOWEST_BODY
-    if lo[1] <= lowest:
-        return '(default label)\n1\nRoundedAlignedCuboid\n0.15\n%f,%f,%f\n%f,%f,%f\n' % (
-            lo[0], max(lo[1], 0.2), lo[2], hi[0], hi[1], hi[2])
-    pts = [(x, y, z) for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])]
-    if wheels:
-        mid = sum(w[1] for w in wheels) / len(wheels)
-        for x, z, hw, r in wheels:
-            pts.append((x + (hw if x > 0 else -hw), lowest, z + (r if z > mid else -r) * 0.5))
-    else:
-        cx, cz = (lo[0] + hi[0]) / 2, (lo[2] + hi[2]) / 2
-        hx, hz = (hi[0] - lo[0]) / 2, (hi[2] - lo[2]) / 2
-        pts += [(cx + sx * hx, lowest, cz + sz * hz * 0.6) for sx in (-1, 1) for sz in (-1, 1)]
-    return ('(default label)\n1\nRoundedPolyhedron\n0.150000\n%d\n' % len(pts)
-            + ''.join('%f,%f,%f\n' % q for q in pts) + '\nform_collision_groups\n1\n')
 
 
 def m_index_base(m):
@@ -455,4 +544,5 @@ def find(data_dirs, sub, name):
 
 if __name__ == '__main__':
     pc_dirs = sys.argv[1].split(';')
-    convert(pc_dirs, sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
+    convert(pc_dirs, sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6],
+            sys.argv[7] if len(sys.argv) > 7 else None)

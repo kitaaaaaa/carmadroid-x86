@@ -10,7 +10,9 @@ namespace {
 namespace fs = std::filesystem;
 
 // Bump when the converter's output changes: installs made by an older version are redone.
-constexpr int kVersion = 1;
+constexpr int kVersion = 15;  // 14: the Monster Masher, physics from the Twister; 15: its shape covers its tyres  // 2: car reflections; 6: collision box as originally (3-5: collision experiments);
+                             // 7: steering deadzone slider; 8-10: handling and shape from each car's stock counterpart;
+                              // 11: short names
 
 fs::path state_dir(const fs::path& root) { return root / "pcimport"; }
 fs::path journal_file(const fs::path& root) { return state_dir(root) / "journal.txt"; }
@@ -69,13 +71,12 @@ void uninstall(const std::string& game_dir) {
 }
 
 void install(const std::string& game_dir, const std::string& carma, const std::string& carsplat) {
-    if (carma.empty() && carsplat.empty()) return;
     const fs::path root = fs::path(game_dir);
     const std::string source = "source v" + std::to_string(kVersion) + " carma=" + folder_id(carma) +
                                " carsplat=" + folder_id(carsplat);
     const auto journal = read_journal(root);
-    if (!journal.empty() && journal.front() == source && journal.back() == "done") {
-        LOGI("pc import: up to date");
+    if (!journal.empty() && journal.back() == "done" && (journal.front() == source || (carma.empty() && carsplat.empty()))) {
+        LOGI("pc import: up to date");  // (without the PC folders, an earlier install is left as it is)
         return;
     }
     uninstall(game_dir);
@@ -89,6 +90,8 @@ void install(const std::string& game_dir, const std::string& carma, const std::s
     inst.journal_path = journal_file(root);
     inst.journal(source);
     try {
+        const int screens = pcimport::install_controls_screen(inst);
+        LOGI("pc import: steering deadzone slider added to %d controls screen layouts", screens);
         if (has_data(carma) && has_data(carsplat)) {
             const int cars = pcimport::install_splat_pack(inst, fs::path(carsplat) / "DATA", fs::path(carma) / "DATA");
             LOGI("pc import: %d Splat Pack cars installed", cars);

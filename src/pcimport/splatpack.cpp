@@ -1,6 +1,7 @@
 // The Splat Pack cars the Android game lacks: convert, then add to the roster and the opponents
 // (port of tools/pc2android/splatpack.py).
 #include "pcimport/cars.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -13,6 +14,10 @@ void Install::write(const fs::path& path, const Bytes& data) {
     const std::string rel = fs::relative(path, root).generic_string();
     if (rel.empty() || rel.rfind("..", 0) == 0) throw std::runtime_error("write outside the game folder: " + path.string());
     const std::string key = lower(rel);
+    if (undo_active_ && !undo_.count(key)) {
+        const bool existed = fs::exists(path);
+        undo_[key] = {rel, existed, existed ? read_file(path) : Bytes()};
+    }
     if (!touched.count(key)) {
         touched.insert(key);
         std::error_code ec;
@@ -34,6 +39,29 @@ void Install::write(const fs::path& path, const Bytes& data) {
     fs::create_directories(path.parent_path(), ec);
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f || !f.write((const char*)data.data(), (std::streamsize)data.size())) throw std::runtime_error("can't write " + rel);
+}
+
+void Install::rollback() {
+    std::error_code ec;
+    for (const auto& [key, prior] : undo_) {
+        const std::string& rel = prior.rel;
+        const fs::path path = root / fs::path(rel);
+        if (prior.existed) {
+            std::ofstream f(path, std::ios::binary | std::ios::trunc);
+            if (!f || !f.write((const char*)prior.data.data(), (std::streamsize)prior.data.size()))
+                LOGE("pc import: couldn't restore %s", rel.c_str());
+            continue;
+        }
+        fs::remove(path, ec);
+        // folders this car created, now empty
+        for (fs::path d = path.parent_path(); d.string().size() > root.string().size(); d = d.parent_path())
+            if (!fs::is_directory(d, ec) || !fs::is_empty(d, ec) || !fs::remove(d, ec)) break;
+        // no longer part of the install (the journal line stays: uninstall skips missing files)
+        created.erase(std::remove(created.begin(), created.end(), rel), created.end());
+        touched.erase(key);
+    }
+    undo_.clear();
+    undo_active_ = false;
 }
 
 void Install::journal(const std::string& line) {
@@ -185,6 +213,7 @@ int install_splat_pack(Install& inst, const fs::path& splat, const fs::path& bas
         if (kDisabled.count(car)) continue;
         const std::string name = android_name(car);
         const fs::path out = content / "VEHICLES" / upper(name);
+        inst.begin_undo();
         try {
             if (fs::exists(out)) LOGI("pc import: replacing %s (installed earlier, e.g. by the Python tools)", name.c_str());
             if (count_cars(content / "QUICKRACECARS.TXT") >= kMaxCars) {
@@ -246,10 +275,12 @@ int install_splat_pack(Install& inst, const fs::path& splat, const fs::path& bas
                 const std::string blurb = upper(info.blurb);
                 set_text_xml(inst, content / "TEXT" / "TEXT.XML", up + "_INFO", &blurb, "BLKEAGLE_INFO");
             }
+            inst.commit();
             installed++;
             LOGI("pc import: added %s (%s)", name.c_str(), display);
         } catch (const std::exception& e) {
-            LOGE("pc import: %s failed: %s", name.c_str(), e.what());
+            LOGE("pc import: %s failed, left out: %s", name.c_str(), e.what());
+            inst.rollback();
         }
     }
     return installed;

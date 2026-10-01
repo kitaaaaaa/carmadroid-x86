@@ -16,10 +16,22 @@ struct Install {
     std::set<std::string> touched;     // lower-case relative paths handled in this run
     fs::path journal_path;             // "created <path>" / "changed <path>" lines are appended as it goes
 
+    // Per-car undo: between begin_undo() and commit()/rollback(), the first write to each file records
+    // what it held before (or that it didn't exist). rollback() puts every such file back, so a car that
+    // fails halfway leaves no roster entries, texts or stray files behind.
+    void begin_undo() { undo_.clear(); undo_active_ = true; }
+    void commit() { undo_.clear(); undo_active_ = false; }
+    void rollback();
+
     void journal(const std::string& line);
     void write(const fs::path& path, const Bytes& data);
     void write(const fs::path& path, const std::string& text) { write(path, Bytes(text.begin(), text.end())); }
     void copy(const fs::path& from, const fs::path& to) { write(to, read_file(from)); }
+
+private:
+    struct Prior { std::string rel; bool existed; Bytes data; };
+    std::map<std::string, Prior> undo_;  // lower-case relative path -> contents before this car
+    bool undo_active_ = false;
 };
 
 // ---- carconv ------------------------------------------------------------------------------

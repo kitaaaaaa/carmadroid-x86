@@ -144,7 +144,9 @@ Mdl read_mdl(const Bytes& data);
 Bytes mtl_with_texture(const Bytes& one_texture_template, const std::string& texture);
 // The same with the game's car reflection: stage 1 "env" (the track's environment map) and stage 2
 // "<texture>_s" (the shine mask), with those stages' settings from a stock car's body material.
-Bytes mtl_with_reflection(const Bytes& one_texture_template, const Bytes& car_template, const std::string& texture);
+// env_texture: the reflected texture ("env" is the track's ENV.IMG).
+Bytes mtl_with_reflection(const Bytes& one_texture_template, const Bytes& car_template, const std::string& texture,
+                          const std::string& env_texture = "env");
 std::string mtl_texture(const Bytes& mtl);  // first texture name, or ""
 
 // ---- LOL (Lua 5.1 bytecode) ---------------------------------------------------------------

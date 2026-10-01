@@ -2,6 +2,7 @@
 // the PC version's 640x480 cockpit images (DATA/64X48X8) are drawn over it here.
 #include "pc_content.h"
 #include "pcimport/formats.h"
+#include "hle/gles.h"
 #include "camera_look.h"
 #include "controller.h"
 #include "cpu.h"
@@ -9,12 +10,14 @@
 #include "memory.h"
 #include "platform.h"
 #include <SDL.h>
+#include <bit>
 #include <windows.h>
 #include <GL/gl.h>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -36,7 +39,36 @@ constexpr u32 kVehicleName = 4;           // char* car name, e.g. "BLKEAGLE" (sa
 // The PC cockpit images are 700x528; the game showed the centre of them on a 640x480 screen.
 // We map the full width and the middle 480 lines to the screen (a slight horizontal stretch on 16:9).
 constexpr float kImgW = 700, kImgTop = 24, kImgH = 480;
+// How each car's PC bonnet model is fitted to the view, by car name (as the game calls it, e.g.
+// "BLKEAGLE"); cars not listed use kDefaultBonnetFit.
+//   raise:      this much of the screen height higher than its place in the view, so more of it shows
+//               above the dashboard (as on the PC, where the dashboard sat lower on the screen)
+//   shift_left: this much of the screen width further left (straightens the look of bonnets placed for a
+//               driver sitting off-centre)
+//   roll_left:  turned this many degrees anticlockwise about the view's centre
+struct BonnetFit {
+    const char* car;
+    float raise, shift_left, roll_left;
+};
+constexpr BonnetFit kDefaultBonnetFit = {"", 0.0f, 0.0f, 0.0f};  // (the bonnet where the PC placed it)
+constexpr BonnetFit kBonnetFits[] = {
+    {"BLKEAGLE", 0.15f, 0.15f, 0.0f},
+};
+
+BonnetFit bonnet_fit(const std::string& car) {
+    for (const BonnetFit& f : kBonnetFits)
+        if (car == f.car) return f;
+    return kDefaultBonnetFit;
+}
 constexpr float kSideViewDeg = 40;  // head turn at which the side cockpit image is shown
+constexpr float kPcScale = 6.9f;    // PC world units -> metres (dethrace WORLD_SCALE)
+
+// In-car camera (libParsons.so v1.8.507)
+constexpr u32 kCameraStatesGot = 0x66F73C;  // GOT slot -> per-player camera state; +0 = camera lump
+constexpr u32 kVehicleModel = 0x1C;         // Vehicle -> its model; +0x18 = its lump
+constexpr u32 kLumpMatrix = 8;              // 3 axis rows, then the position
+constexpr u32 kLumpCamera = 0x78;           // camera lump -> BZ::Camera
+constexpr u32 kCameraFov = 0x174;          // BZ::Camera vertical field of view (degrees)
 
 constexpr GLenum kClampToEdge = 0x812F, kTexture0 = 0x84C0, kActiveTexture = 0x84E0;
 using PFN_ActiveTexture = void(APIENTRY*)(GLenum);
@@ -76,6 +108,14 @@ struct DamageIcon {
     std::shared_ptr<Image> img;
 };
 
+// Triangles of the bonnet model sharing one texture (0 = none): positions, texture coordinates and
+// colours (with flat shading baked in), 3 corners per triangle.
+struct BonnetBatch {
+    GLuint tex = 0;
+    std::vector<float> xyz, uv;
+    std::vector<u8> rgba;
+};
+
 struct Cockpit {
     std::shared_ptr<Image> view[3];  // forward, left, right
     std::vector<HandFrame> hands;
@@ -83,6 +123,11 @@ struct Cockpit {
     int gear_x = 0, gear_y = 0;
     std::shared_ptr<Image> gears;    // R, N, 1..6 stacked vertically
     std::vector<DamageIcon> damage;  // PC order: engine, transmission, steering, 4 brakes, 4 wheels
+    bool has_head = false;
+    float head_pc[3] = {};  // the driver's head (PC car units and axes)
+    float head[3] = {};     // the same in the game's car space (metres, z flipped)
+    std::vector<BonnetBatch> bonnet;  // the PC in-car bonnet model (car space, PC units)
+    BonnetFit fit = kDefaultBonnetFit;
 };
 
 std::map<std::string, std::shared_ptr<Image>> g_images;
@@ -234,6 +279,154 @@ Gauge parse_gauge(const std::string& line) {
     return g;
 }
 
+// A file under DATA/<sub>: from the base game, else from the Splat Pack ("" if neither has it).
+std::filesystem::path data_file(const std::string& sub, const std::string& name) {
+    for (const std::string& d : {g_dir, g_splat_dir}) {
+        if (d.empty()) continue;
+        const std::filesystem::path p = std::filesystem::path(d) / "DATA" / sub / name;
+        if (std::filesystem::exists(p)) return p;
+    }
+    return {};
+}
+
+std::string upper_case(std::string s) {
+    for (char& ch : s) ch = (char)toupper((unsigned char)ch);
+    return s;
+}
+
+bool ends_with(const std::string& s, const char* tail) {
+    const size_t n = strlen(tail);
+    return s.size() >= n && s.compare(s.size() - n, n, tail) == 0;
+}
+
+// The PC in-car view hides the car and draws its bonnet actor instead ("-1,<name>.ACT" in DATA/CARS/<car>.TXT):
+// a model of the visible part of the bonnet, placed for the driver's eye. Built from the car's model,
+// material and pixelmap files (every one listed in the TXT).
+void load_bonnet(const std::vector<std::string>& lines, std::vector<BonnetBatch>& out) {
+    std::string actor_file;
+    std::vector<std::string> dats, mats, pixes;
+    for (const auto& l : lines) {
+        const std::string u = upper_case(l);
+        if (ends_with(u, ".DAT")) dats.push_back(u);
+        else if (ends_with(u, ".MAT")) mats.push_back(u);
+        else if (ends_with(u, ".PIX")) pixes.push_back(u);
+        const auto f = split(u);
+        if (f.size() == 2 && f[0] == "-1" && ends_with(f[1], ".ACT")) actor_file = f[1];
+    }
+    if (actor_file.empty()) return;
+    try {
+        std::map<std::string, pcimport::BrModel> models;
+        std::map<std::string, pcimport::BrMaterial> materials;
+        std::map<std::string, pcimport::BrPixmap> maps;
+        for (const auto& n : dats)
+            if (auto p = data_file("MODELS", n); !p.empty())
+                for (auto& [k, v] : pcimport::read_dat(p)) models[k] = std::move(v);
+        for (const auto& n : mats)
+            if (auto p = data_file("MATERIAL", n); !p.empty())
+                for (auto& [k, v] : pcimport::read_mat(p)) materials[k] = std::move(v);
+        for (const auto& n : pixes)
+            if (auto p = data_file("PIXELMAP", n); !p.empty())
+                for (auto& [k, v] : pcimport::read_all_pix(p)) maps.emplace(k, std::move(v));
+        const auto p = data_file("ACTORS", actor_file);
+        if (p.empty()) return;
+        const auto actors = pcimport::read_act(p);
+
+        std::map<std::string, GLuint> textures;  // by map name
+        auto texture = [&](const std::string& name) -> GLuint {
+            std::string key = upper_case(name);
+            auto t = textures.find(key);
+            if (t != textures.end()) return t->second;
+            auto m = maps.find(key);
+            if (m == maps.end() && ends_with(key, ".PIX")) m = maps.find(key.substr(0, key.size() - 4));
+            if (m == maps.end()) m = maps.find(key + ".PIX");
+            GLuint tex = 0;
+            if (m != maps.end() && m->second.w > 0) {
+                const auto& pm = m->second;
+                std::vector<u32> rgba((size_t)pm.w * pm.h);
+                for (int y = 0; y < pm.h; y++)
+                    for (int x = 0; x < pm.w; x++) rgba[(size_t)y * pm.w + x] = g_palette[pm.px[(size_t)y * pm.row + x]];
+                glGenTextures(1, &tex);
+                glBindTexture(GL_TEXTURE_2D, tex);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, pm.w, pm.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+            }
+            textures[key] = tex;
+            return tex;
+        };
+
+        using M12 = std::array<double, 12>;
+        auto mul = [](const M12& a, const M12& b) {  // BRender row-vector matrices: a then b
+            M12 r{};
+            for (int i = 0; i < 4; i++)
+                for (int j = 0; j < 3; j++)
+                    r[i * 3 + j] = a[i * 3] * b[j] + a[i * 3 + 1] * b[3 + j] + a[i * 3 + 2] * b[6 + j] + (i == 3 ? b[9 + j] : 0);
+            return r;
+        };
+        std::map<GLuint, size_t> batch_of;
+        std::function<void(const pcimport::BrActor&, const M12&, const std::string&)> visit =
+            [&](const pcimport::BrActor& actor, const M12& parent, const std::string& inherited) {
+                const M12 m = mul(actor.m, parent);
+                const std::string actor_mat = actor.material.empty() ? inherited : actor.material;
+                auto mi = actor.model.empty() ? models.end() : models.find(upper_case(actor.model));
+                if (mi != models.end()) {
+                    const pcimport::BrModel& model = mi->second;
+                    for (size_t fi = 0; fi < model.faces.size(); fi++) {
+                        const int mat_i = fi < model.face_mats.size() ? model.face_mats[fi] : 0;
+                        std::string mat_name = mat_i > 0 && (size_t)(mat_i - 1) < model.materials.size()
+                                                   ? model.materials[mat_i - 1] : actor_mat;
+                        auto mat = materials.find(upper_case(mat_name));
+                        if (mat == materials.end()) mat = materials.find(upper_case(mat_name) + ".MAT");
+                        const GLuint tex = mat != materials.end() && !mat->second.texture.empty()
+                                               ? texture(mat->second.texture) : 0;
+                        std::array<u8, 4> colour = {255, 255, 255, 255};
+                        if (!tex && mat != materials.end()) colour = mat->second.colour;
+                        float v[3][3];
+                        bool ok = true;
+                        for (int k = 0; k < 3; k++) {
+                            const u16 vi = model.faces[fi][k];
+                            if (vi >= model.verts.size()) { ok = false; break; }
+                            const auto& p = model.verts[vi];
+                            for (int j = 0; j < 3; j++) v[k][j] = (float)(p[0] * m[j] + p[1] * m[3 + j] + p[2] * m[6 + j] + m[9 + j]);
+                        }
+                        if (!ok) continue;
+                        // Flat shading from above and slightly in front (the PC models are prelit by shade tables).
+                        const float ax = v[1][0] - v[0][0], ay = v[1][1] - v[0][1], az = v[1][2] - v[0][2];
+                        const float bx = v[2][0] - v[0][0], by = v[2][1] - v[0][1], bz = v[2][2] - v[0][2];
+                        float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+                        const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+                        if (len <= 0) continue;
+                        nx /= len, ny /= len, nz /= len;
+                        const float light = 0.6f + 0.4f * std::fabs(ny * 0.9f - nz * 0.44f);
+                        auto b = batch_of.find(tex);
+                        if (b == batch_of.end()) {
+                            b = batch_of.emplace(tex, out.size()).first;
+                            out.emplace_back();
+                            out.back().tex = tex;
+                        }
+                        BonnetBatch& batch = out[b->second];
+                        for (int k = 0; k < 3; k++) {
+                            const u16 vi = model.faces[fi][k];
+                            for (int j = 0; j < 3; j++) batch.xyz.push_back(v[k][j]);
+                            batch.uv.push_back(vi < model.uvs.size() ? model.uvs[vi][0] : 0);
+                            batch.uv.push_back(vi < model.uvs.size() ? model.uvs[vi][1] : 0);
+                            for (int j = 0; j < 3; j++) batch.rgba.push_back((u8)(colour[j] * light));
+                            batch.rgba.push_back(255);
+                        }
+                    }
+                }
+                for (const auto& c : actor.children) visit(c, m, actor_mat);
+            };
+        for (const auto& a : actors) visit(a, M12{1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0}, "");
+        size_t tris = 0;
+        for (const auto& b : out) tris += b.xyz.size() / 9;
+        LOGI("pc: bonnet %s: %zu triangles", actor_file.c_str(), tris);
+    } catch (const std::exception& e) {
+        LOGE("pc: can't read the bonnet %s: %s", actor_file.c_str(), e.what());
+        out.clear();
+    }
+}
+
 // DATA/64X48X8/CARS/<car>.TXT: forward/left/right images (each followed by a rectangle),
 // speedo/tacho/gear lines, then the hands frame count and one line per frame.
 std::unique_ptr<Cockpit> load_cockpit(const std::string& car) {
@@ -287,6 +480,25 @@ std::unique_ptr<Cockpit> load_cockpit(const std::string& car) {
             cp->hands.push_back(h);
         }
     }
+    // DATA/CARS/<car>.TXT: "START OF DRIVABLE STUFF", then the driver's head offset (PC car units).
+    auto car_lines = text_lines(data_path("CARS/" + car + ".TXT"));
+    if (car_lines.empty() && car.size() > 3 && car.compare(0, 3, "CAR") == 0 && isdigit((unsigned char)car[3]))
+        car_lines = text_lines(data_path("CARS/" + car.substr(3) + ".TXT"));
+    for (size_t k = 0; k + 1 < car_lines.size(); k++) {
+        if (car_lines[k] != "START OF DRIVABLE STUFF") continue;
+        const auto f = split(car_lines[k + 1]);
+        if (f.size() >= 3) {
+            // PC units -> metres, z flipped (as the converted cars: pcimport to_android).
+            for (int k = 0; k < 3; k++) cp->head_pc[k] = (float)std::atof(f[k].c_str());
+            cp->head[0] = cp->head_pc[0] * kPcScale;
+            cp->head[1] = cp->head_pc[1] * kPcScale;
+            cp->head[2] = -cp->head_pc[2] * kPcScale;
+            cp->has_head = true;
+        }
+        break;
+    }
+    if (cp->has_head) load_bonnet(car_lines, cp->bonnet);
+    cp->fit = bonnet_fit(car);
     LOGI("pc: loaded cockpit for %s (%zu hands frames)", car.c_str(), cp->hands.size());
     return cp;
 }
@@ -294,8 +506,16 @@ std::unique_ptr<Cockpit> load_cockpit(const std::string& car) {
 float g_sx = 1, g_sy = 1;  // cockpit image pixels -> screen pixels
 
 // Draws the part (u,v,w,h) of an image with its top-left at cockpit image position (x,y).
+// The graphics options' texture filtering, for the texture bound now.
+void set_filter() {
+    const GLint f = gles::texture_filtering() ? GL_LINEAR : GL_NEAREST;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, f);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, f);
+}
+
 void blit(const Image& img, float x, float y, float u, float v, float w, float h) {
     glBindTexture(GL_TEXTURE_2D, img.tex);
+    set_filter();
     const float x0 = x * g_sx, y0 = (y - kImgTop) * g_sy, x1 = (x + w) * g_sx, y1 = (y + h - kImgTop) * g_sy;
     const float s0 = u / img.w, t0 = v / img.h, s1 = (u + w) / img.w, t1 = (v + h) / img.h;
     glBegin(GL_QUADS);
@@ -397,6 +617,70 @@ void draw_instruments(const Cockpit& cp, const Instruments& in) {
     }
 }
 
+const Cockpit* cockpit_for(const char* name) {
+    auto it = g_cockpits.find(name);
+    if (it == g_cockpits.end()) it = g_cockpits.emplace(name, load_cockpit(name)).first;
+    return it->second.get();
+}
+
+float g_cam_fov = 55.55f;  // the in-car camera's vertical field of view (degrees), read each frame
+
+// The bonnet model from the driver's head, looking along the car (PC: -z) with the head turned by yaw
+// degrees (positive = right), in the game camera's field of view. Drawn over the world, under the dashboard.
+void draw_bonnet(const Cockpit& cp, int w, int h, float yaw) {
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glTranslatef(-cp.fit.shift_left * 2, cp.fit.raise * 2, 0);  // (screen width and height = 2 in clip space)
+    const float near_clip = 0.01f, far_clip = 10.0f;  // PC car units (PC: GENERAL.TXT hither)
+    // As the PC drew it on its 4:3 screen, then stretched across the screen like the dashboard image
+    // (whose 700 pixels fill the width where the PC showed 640).
+    const float top = near_clip * std::tan(g_cam_fov * 0.5f * 3.14159265f / 180.0f);
+    const float right = top * (4.0f / 3.0f) * (kImgW / 640.0f);
+    glFrustum(-right, right, -top, top, near_clip, far_clip);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    glRotatef(cp.fit.roll_left, 0, 0, 1);  // (about the view direction; positive = anticlockwise)
+    glRotatef(yaw, 0, 1, 0);
+    glTranslatef(-cp.head_pc[0], -cp.head_pc[1], -cp.head_pc[2]);
+
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+    glEnable(GL_ALPHA_TEST);
+    glAlphaFunc(GL_GREATER, 0.5f);
+    for (const BonnetBatch& b : cp.bonnet) {
+        if (b.tex) {
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, b.tex);
+            set_filter();
+        } else {
+            glDisable(GL_TEXTURE_2D);
+        }
+        glBegin(GL_TRIANGLES);
+        for (size_t k = 0; k < b.xyz.size() / 3; k++) {
+            glColor4ubv(&b.rgba[k * 4]);
+            glTexCoord2f(b.uv[k * 2], b.uv[k * 2 + 1]);
+            glVertex3fv(&b.xyz[k * 3]);
+        }
+        glEnd();
+    }
+    glDisable(GL_ALPHA_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glEnable(GL_BLEND);
+    glEnable(GL_TEXTURE_2D);
+    glColor4f(1, 1, 1, 1);
+
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+}
+
 void draw_cockpit() {
     g_dash_active = false;
     if (!platform::in_race() || !camera_look::bonnet_view()) return;
@@ -418,9 +702,7 @@ void draw_cockpit() {
         pActiveTexture(kTexture0);
     }
 
-    auto it = g_cockpits.find(name);
-    if (it == g_cockpits.end()) it = g_cockpits.emplace(name, load_cockpit(name)).first;
-    const Cockpit* cp = it->second.get();
+    const Cockpit* cp = cockpit_for(name);
     g_dash_active = cp != nullptr;
     if (cp) {
         glViewport(0, 0, w, h);
@@ -455,6 +737,7 @@ void draw_cockpit() {
         const bool behind = std::fabs(yaw) > 120;  // looking out of the back: no cockpit
         const int view = yaw <= -kSideViewDeg ? 1 : yaw >= kSideViewDeg ? 2 : 0;
         const Image* img = cp->view[view] ? cp->view[view].get() : cp->view[0].get();
+        if (!behind && !cp->bonnet.empty()) draw_bonnet(*cp, w, h, yaw);
         if (!behind) quad(*img, 0, 0);
         Instruments in;
         if (view == 0 && !behind && read_instruments(veh, in)) draw_instruments(*cp, in);
@@ -507,6 +790,28 @@ bool hide_hud_item(u32 item) {
 }
 
 }  // namespace
+
+void place_bonnet_camera() {
+    if (!g_lib || !platform::in_race() || !camera_look::bonnet_view()) return;
+    const u32 states = mem::r32(g_lib + kCameraStatesGot);
+    const u32 cam_lump = states ? mem::r32(states) : 0;
+    const u32 veh = mem::r32(g_lib + kPlayerVehicle);
+    const u32 model = mem::valid(veh, 0x20) ? mem::r32(veh + kVehicleModel) : 0;
+    const u32 lump = mem::valid(model, 0x1C) ? mem::r32(model + 0x18) : 0;
+    const char* name = mem::valid(veh, 8) ? mem::str(mem::r32(veh + kVehicleName)) : nullptr;
+    if (!name || !mem::valid(mem::guest(name), 1) || !mem::valid(lump + kLumpMatrix, 48) ||
+        !mem::valid(cam_lump + kLumpCamera, 4))
+        return;
+    const Cockpit* cp = cockpit_for(name);
+    if (!cp || !cp->has_head) return;
+    if (const u32 cam = mem::r32(cam_lump + kLumpCamera); mem::valid(cam + kCameraFov, 4))
+        g_cam_fov = std::bit_cast<float>(mem::r32(cam + kCameraFov));
+    // The camera keeps the game's orientation (the car's); only its position moves to the driver's head.
+    const float* m = mem::ptr<float>(lump + kLumpMatrix);
+    float* cm = mem::ptr<float>(cam_lump + kLumpMatrix);
+    for (int k = 0; k < 3; k++)
+        cm[9 + k] = m[9 + k] + cp->head[0] * m[k] + cp->head[1] * m[3 + k] + cp->head[2] * m[6 + k];
+}
 
 void apply_patches() {
     if (g_dir.empty() || !g_cockpit) return;

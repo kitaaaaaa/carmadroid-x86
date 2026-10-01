@@ -2,11 +2,13 @@
 // Nearly 1:1; the main work is translating guest pointers and loading >1.1 entry points.
 #include "../platform.h"
 #include "hle_common.h"
+#include "gles.h"
 #include <windows.h>
 #include <GL/gl.h>
 #include <map>
 #include <mutex>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #ifndef APIENTRY
@@ -113,7 +115,78 @@ const void* index_ptr(u32 g) { return g_element_buffer ? (const void*)(uintptr_t
 
 u32 g_str_vendor, g_str_renderer, g_str_version, g_str_ext;
 
+// Texture filtering: the game's own min/mag filters per texture (GL defaults until it sets them), so they
+// can be swapped for nearest-neighbour ones and back.
+struct Filters {
+    GLint min = GL_NEAREST_MIPMAP_LINEAR, mag = GL_LINEAR;
+};
+std::unordered_map<GLuint, Filters> g_tex_filters;
+bool g_smooth = true;
+
+GLint shown_min(GLint f) {
+    if (g_smooth) return f;
+    switch (f) {
+        case GL_LINEAR: return GL_NEAREST;
+        case GL_LINEAR_MIPMAP_LINEAR: return GL_NEAREST_MIPMAP_LINEAR;
+        case GL_LINEAR_MIPMAP_NEAREST: return GL_NEAREST_MIPMAP_NEAREST;
+        default: return f;
+    }
+}
+GLint shown_mag(GLint f) { return g_smooth ? f : GL_NEAREST; }
+
+GLuint bound_texture_2d() {
+    GLint t = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &t);
+    return (GLuint)t;
+}
+
+// A texture gets its image: remember it (with the filters it has so far) and apply the setting.
+void texture_made(GLenum target) {
+    if (target != GL_TEXTURE_2D) return;
+    const GLuint t = bound_texture_2d();
+    if (!t) return;
+    auto [it, added] = g_tex_filters.try_emplace(t);
+    if (added && !g_smooth) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, shown_min(it->second.min));
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, shown_mag(it->second.mag));
+    }
+}
+
+// glTexParameter: filters are recorded and passed on as the setting shows them; anything else as it is.
+void tex_parameter(GLenum target, GLenum pname, GLint value) {
+    if (target == GL_TEXTURE_2D && (pname == GL_TEXTURE_MIN_FILTER || pname == GL_TEXTURE_MAG_FILTER)) {
+        Filters& f = g_tex_filters[bound_texture_2d()];
+        if (pname == GL_TEXTURE_MIN_FILTER) {
+            f.min = value;
+            value = shown_min(value);
+        } else {
+            f.mag = value;
+            value = shown_mag(value);
+        }
+    }
+    glTexParameteri(target, pname, value);
+}
+
 }  // namespace
+
+namespace gles {
+
+void set_texture_filtering(bool smooth) {
+    if (smooth == g_smooth) return;
+    g_smooth = smooth;
+    const GLuint was = bound_texture_2d();
+    for (const auto& [t, f] : g_tex_filters) {
+        if (!t || !glIsTexture(t)) continue;
+        glBindTexture(GL_TEXTURE_2D, t);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, shown_min(f.min));
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, shown_mag(f.mag));
+    }
+    glBindTexture(GL_TEXTURE_2D, was);
+}
+
+bool texture_filtering() { return g_smooth; }
+
+}  // namespace gles
 
 // --- state ---------------------------------------------------------------
 HLE(glEnable) { glEnable(c.r(0)); }
@@ -209,13 +282,22 @@ HLE(glMaterialfv) { glMaterialfv(c.r(0), c.r(1), mem::ptr<GLfloat>(c.r(2))); }
 
 // --- textures ------------------------------------------------------------
 HLE(glGenTextures) { glGenTextures((GLsizei)c.r(0), mem::ptr<GLuint>(c.r(1))); }
-HLE(glDeleteTextures) { glDeleteTextures((GLsizei)c.r(0), mem::ptr<GLuint>(c.r(1))); }
+HLE(glDeleteTextures) {
+    const GLsizei n = (GLsizei)c.r(0);
+    const GLuint* ids = mem::ptr<GLuint>(c.r(1));
+    for (GLsizei i = 0; i < n; i++) g_tex_filters.erase(ids[i]);
+    glDeleteTextures(n, ids);
+}
 HLE(glBindTexture) { glBindTexture(c.r(0), c.r(1)); }
 HLE(glActiveTexture) { load_procs(); pActiveTexture(c.r(0)); }
 HLE(glClientActiveTexture) { load_procs(); pClientActiveTexture(c.r(0)); }
-HLE(glTexParameteri) { glTexParameteri(c.r(0), c.r(1), (GLint)c.r(2)); }
-HLE(glTexParameterx) { glTexParameteri(c.r(0), c.r(1), (GLint)c.r(2)); }  // enum params are not scaled
-HLE(glTexParameterf) { glTexParameterf(c.r(0), c.r(1), F(c, 2)); }
+HLE(glTexParameteri) { tex_parameter(c.r(0), c.r(1), (GLint)c.r(2)); }
+HLE(glTexParameterx) { tex_parameter(c.r(0), c.r(1), (GLint)c.r(2)); }  // enum params are not scaled
+HLE(glTexParameterf) {
+    const GLenum pname = c.r(1);
+    if (pname == GL_TEXTURE_MIN_FILTER || pname == GL_TEXTURE_MAG_FILTER) tex_parameter(c.r(0), pname, (GLint)F(c, 2));
+    else glTexParameterf(c.r(0), pname, F(c, 2));
+}
 HLE(glTexEnvi) { glTexEnvi(c.r(0), c.r(1), (GLint)c.r(2)); }
 HLE(glTexEnvx) { glTexEnvi(c.r(0), c.r(1), (GLint)c.r(2)); }
 HLE(glTexEnvf) { glTexEnvf(c.r(0), c.r(1), F(c, 2)); }
@@ -224,6 +306,7 @@ HLE(glTexImage2D) {
     // (target, level, internalformat, width, height, border, format, type, pixels)
     glTexImage2D(c.r(0), (GLint)c.r(1), (GLint)c.r(2), (GLsizei)c.r(3), (GLsizei)c.arg(4), (GLint)c.arg(5), c.arg(6),
                  c.arg(7), mem::ptr(c.arg(8)));
+    texture_made(c.r(0));
 }
 HLE(glTexSubImage2D) {
     // (target, level, xoffset, yoffset, width, height, format, type, pixels)
@@ -235,6 +318,7 @@ HLE(glCompressedTexImage2D) {
     load_procs();
     pCompressedTexImage2D(c.r(0), (GLint)c.r(1), c.r(2), (GLsizei)c.r(3), (GLsizei)c.arg(4), (GLint)c.arg(5),
                           (GLsizei)c.arg(6), mem::ptr(c.arg(7)));
+    texture_made(c.r(0));
 }
 HLE(glCopyTexImage2D) {
     glCopyTexImage2D(c.r(0), (GLint)c.r(1), c.r(2), (GLint)c.r(3), (GLint)c.arg(4), (GLsizei)c.arg(5),

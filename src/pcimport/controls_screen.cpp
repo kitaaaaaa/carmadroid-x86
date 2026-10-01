@@ -386,7 +386,201 @@ bool is_known_controls_logic(const Bytes& d) {
     }
 }
 
+// The statement "local tN = <callee>({id = <id>, ...})".
+Stmt* item_with_id(std::vector<Stmt>& stmts, const std::string& id) {
+    for (auto& st : stmts) {
+        if (st.locals.size() != 1 || !st.expr || st.expr->kind != Expr::Call || st.expr->array.size() != 1) continue;
+        const ExprP t = st.expr->array[0];
+        if (t->kind != Expr::Table) continue;
+        const ExprP f = field(t, "id");
+        if (f && f->kind == Expr::Text && f->text == id) return &st;
+    }
+    return nullptr;
+}
+
+// The graphics screen's layout: the audio screen's, with its music on/off row turned into the texture
+// filtering on/off row and the two volume sliders taken out.
+std::string make_graphics_layout(const Bytes& audio_layout) {
+    auto stmts = decompile(audio_layout);
+    Stmt* list = nullptr;
+    for (auto& st : stmts)
+        if (st.locals.empty() && st.lhs.empty() && st.expr && st.expr->kind == Expr::Call && st.expr->text == "content") list = &st;
+    Stmt* prat_text = item_with_id(stmts, "id.pratText");
+    Stmt* music_text = item_with_id(stmts, "id.MusicText");
+    Stmt* on = item_with_id(stmts, "id.music_volume_on");
+    Stmt* off = item_with_id(stmts, "id.music_volume_off");
+    if (!list || !prat_text || !music_text || !on || !off) throw std::runtime_error("unexpected audio layout");
+    // The row goes to the middle line (the prat volume's).
+    const ExprP label = music_text->expr->array[0];
+    set_field(label, "id", "id.texture_filter_text");
+    set_field(label, "text", "\"TEXTURE FILTERING\"");
+    set_field(label, "y", num(num_field(prat_text->expr->array[0], "y")));
+    set_field(on->expr->array[0], "id", "id.texture_filter_on");
+    // No tab starts selected: the screen's on_push selects the saved one (a tab that starts selected
+    // announces a value change as the screen is built, before on_push).
+    auto& on_fields = on->expr->array[0]->fields;
+    on_fields.erase(std::remove_if(on_fields.begin(), on_fields.end(), [](const auto& kv) { return kv.first == "value"; }),
+                    on_fields.end());
+    set_field(on->expr->array[0], "group", "id.texture_filter_tabs");
+    set_field(off->expr->array[0], "id", "id.texture_filter_off");
+    set_field(off->expr->array[0], "group", "id.texture_filter_tabs");
+    // Out: the sfx and prat volume rows.
+    std::set<std::string> gone;
+    for (const char* id : {"id.sfxText", "id.sfx_slider", "id.pratText", "id.prat_slider"}) {
+        Stmt* st = item_with_id(stmts, id);
+        if (!st) throw std::runtime_error("unexpected audio layout");
+        gone.insert(st->locals[0]);
+    }
+    ExprP items = field(list->expr->array[0], "items");
+    if (!items || items->kind != Expr::Table) throw std::runtime_error("audio layout: no item list");
+    items->array.erase(std::remove_if(items->array.begin(), items->array.end(),
+                                      [&](const ExprP& e) { return e->kind == Expr::Text && gone.count(e->text); }),
+                       items->array.end());
+    stmts.erase(std::remove_if(stmts.begin(), stmts.end(),
+                               [&](const Stmt& st) { return st.locals.size() == 1 && gone.count(st.locals[0]); }),
+                stmts.end());
+    return "-- carmadroid: the graphics options screen (made from the game's audio screen layout)\n" + emit(stmts);
+}
+
+// UI/LOGIC/FRONTEND/GRAPHICS.LOL. "texture_filtering": 1 on, 0 off (controller.cpp applies and saves it).
+const char* const kGraphicsLogic = R"(-- carmadroid: the graphics options screen (texture filtering on/off)
+module(..., lube.menu_logic)
+
+-- The setting follows whichever tab is selected. (Selecting a tab first deselects the other, each one
+-- announcing a value change, so the tabs are asked rather than the event trusted.)
+local function update_setting(self)
+  local item
+  if self:send_item_message(id.texture_filter_off, message.get_value) then
+    item = self:get_item_by_id(id.texture_filter_off)
+    properties.texture_filtering = 0
+  else
+    item = self:get_item_by_id(id.texture_filter_on)
+    properties.texture_filtering = 1
+  end
+  self:set_item_position_x(id.tabbing_dooda, item:get_position_x(), 0.2, transition.ease_in)
+end
+
+on_event[id.back] = function(self, item, ev)
+  if ev == event.click then
+    ui:pop()
+  end
+end
+
+function on_push(self)
+  if properties.texture_filtering == 0 then
+    self:send_item_message(id.texture_filter_off, message.set_value, {value = 1})
+  else
+    self:send_item_message(id.texture_filter_on, message.set_value, {value = 1})
+  end
+  update_setting(self)
+  self:refresh()
+end
+
+on_event[id.texture_filter_on] = function(self, item, ev)
+  if ev == event.value_change then
+    update_setting(self)
+  end
+end
+
+on_event[id.texture_filter_off] = function(self, item, ev)
+  if ev == event.value_change then
+    update_setting(self)
+  end
+end
+)";
+
+// UI/LOGIC/FRONTEND/OPTIONS.LOL, as the game's, except that the restore purchases button opens the graphics screen.
+const char* const kOptionsLogic = R"(-- carmadroid: the game's options screen logic; "restore purchases" (Google Play) opens the graphics options
+module(..., lube.menu_logic)
+require("frontend.achievements")
+require("frontend.controls")
+require("frontend.credits")
+require("frontend.info")
+require("frontend.save_slots")
+require("frontend.audio")
+require("frontend.graphics")
+
+on_event[id.controls] = helpers.on_click_push(frontend.controls)
+on_event[id.info] = helpers.on_click_push(frontend.info)
+on_event[id.audio] = helpers.on_click_push(frontend.audio)
+on_event[id.restore_purchases] = helpers.on_click_push(frontend.graphics)
+
+on_event[id.leaderboards] = function(self, item, ev)
+  if ev == event.click then
+    game:show_leaderboards()
+  end
+end
+
+on_event[id.achievements] = function(self, item, ev)
+  if ev == event.click then
+    game:show_achievements()
+  end
+end
+
+on_event[id.save_managment] = function(self, item, ev)
+  if ev == event.click then
+    properties.EnteredSaveManagmentFromOptionsMenu = 1
+    ui:push(frontend.save_slots)
+  end
+end
+
+on_event[id.back] = function(self, item, ev)
+  if ev == event.click then
+    game:save_settings()
+    callback.show_the_hub()
+  end
+end
+)";
+
+// The game's options logic, as this replacement expects it (its functions and constants).
+bool is_known_options_logic(const Bytes& d) {
+    try {
+        const auto funcs = lua_load(d);
+        if (funcs.size() != 6) return false;
+        std::set<std::string> ks;
+        for (const auto& f : funcs)
+            for (const auto& k : f.k)
+                if (k.type == LuaConst::Str) ks.insert(k.str);
+        for (const char* need : {"frontend.audio", "on_click_push", "show_leaderboards", "show_achievements",
+                                 "EnteredSaveManagmentFromOptionsMenu", "show_the_hub", "restore_purchases",
+                                 "ForceRestoreTransactions"})
+            if (!ks.count(need)) return false;
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 }  // namespace
+
+int install_graphics_screen(Install& inst) {
+    const fs::path ui = inst.root / "DATA" / "CONTENT" / "UI";
+    const fs::path options = ui / "LOGIC" / "FRONTEND" / "OPTIONS.LOL";
+    Bytes d;
+    if (!read_file(options, d) || !is_known_options_logic(d)) {
+        LOGI("pc import: options screen not recognised, no graphics options");
+        return 0;
+    }
+    std::vector<std::pair<fs::path, std::string>> layouts;
+    try {
+        for (const auto& e : fs::recursive_directory_iterator(ui / "LAYOUT")) {
+            if (!e.is_regular_file() || upper(e.path().filename().string()) != "AUDIO_LAYOUT.LOL") continue;
+            layouts.push_back({e.path().parent_path() / "GRAPHICS_LAYOUT.LOL", make_graphics_layout(read_file(e.path()))});
+        }
+    } catch (const std::exception& e) {
+        LOGI("pc import: %s, no graphics options", e.what());
+        return 0;
+    }
+    if (layouts.empty()) return 0;
+    for (const auto& [p, s] : layouts) inst.write(p, s);
+    inst.write(ui / "LOGIC" / "FRONTEND" / "GRAPHICS.LOL", std::string(kGraphicsLogic));
+    inst.write(options, std::string(kOptionsLogic));
+    const std::string label = "GRAPHICS";  // (English in every language)
+    set_text_xml(inst, inst.root / "DATA" / "CONTENT" / "TEXT" / "TEXT.XML", "RESTORE_PURCHASES", &label, "RESTORE_PURCHASES");
+    return (int)layouts.size();
+}
+
+std::string lua_source(const Bytes& compiled) { return emit(decompile(compiled)); }
 
 int install_controls_screen(Install& inst) {
     const fs::path ui = inst.root / "DATA" / "CONTENT" / "UI";

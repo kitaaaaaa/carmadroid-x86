@@ -305,7 +305,7 @@ def parse_mtl(data):
     return head, stages, data[r.p:]
 
 
-def mtl_with_reflection(template, car_template, texture):
+def mtl_with_reflection(template, car_template, texture, env='env'):
     """A one-texture material with the game's car reflection: stage 1 "env" (the track's environment map) and
     stage 2 "<texture>_s" (the shine mask), those stages' settings from a stock car's body material, and the
     car's lighting settings (with them the game builds the meshes with the normals the reflection uses)."""
@@ -316,7 +316,7 @@ def mtl_with_reflection(template, car_template, texture):
     w = st.Writer()
     w.raw(head)
     w.u32(3)
-    for name, settings in ((texture, one[0][1]), ('env', car[1][1]), (texture + '_s', car[2][1])):
+    for name, settings in ((texture, one[0][1]), (env, car[1][1]), (texture + '_s', car[2][1])):
         w.pstr(name)
         w.raw(settings)
     w.raw(trailer)
@@ -324,6 +324,11 @@ def mtl_with_reflection(template, car_template, texture):
 
 
 SHINE = 0.35  # shine mask brightness relative to the texture (the game's own masks average ~13-45/255)
+# PC environment-mapped materials (BRender ENVIRONMENT_I/L flags; the windows' shared "DRSKY" sky): the PC
+# draws them as a reflection of their texture only (the orange sunset of DRSKY.PIX). Here: dark glass with a
+# near-white shine mask, reflecting that texture at full strength through the game's reflection pass.
+ENV_MAP_FLAGS = 0x08 | 0x10
+GLASS, GLASS_SHINE = (28, 34, 44), (235, 235, 235)
 
 
 def shine_mask(w, h, rgba):
@@ -480,6 +485,32 @@ def convert(data_dirs, car_txt, out_dir, template_dir, mtl_template, car_mtl_tem
     car_tmpl = open(car_mtl_template, 'rb').read()
     for pc_name, name in used_mats.items():
         m = materials.get(pc_name) or materials.get(pc_name.replace('.MAT', '').upper())
+        if (m and m.flags & ENV_MAP_FLAGS) or pc_name.replace('.MAT', '') == 'DRSKY':
+            pix = m.texture if m and m.texture else 'DRSKY.PIX'
+            refl = pixmaps.rgba(pix)
+            if not refl:
+                for d in data_dirs:
+                    p = os.path.join(d, 'PIXELMAP', pix)
+                    if os.path.exists(p):
+                        one = PixelmapSource([], [], palette)
+                        one.maps = read_all_pix(p)
+                        refl = one.rgba(pix)
+                        break
+            env = 'env'  # (the track's sky, if the texture is missing)
+            if refl:
+                import uiimg
+                rw, rh, rpx = refl
+                w2, h2 = 1, 1  # power-of-two size, as the game's textures
+                while w2 * 2 <= rw: w2 *= 2
+                while h2 * 2 <= rh: h2 *= 2
+                rpx = bytearray(rpx)
+                rpx[3::4] = b'\xff' * (len(rpx) // 4)
+                env = name + '_env'
+                write_img(os.path.join(out_dir, env.upper() + '.IMG'), w2, h2, uiimg.resize(rw, rh, bytes(rpx), w2, h2))
+            write_img(os.path.join(out_dir, name.upper() + '.IMG'), 8, 8, bytes(GLASS + (255,)) * 64)
+            write_img(os.path.join(out_dir, name.upper() + '_S.IMG'), 8, 8, bytes(GLASS_SHINE + (255,)) * 64)
+            open(os.path.join(out_dir, name.upper() + '.MTL'), 'wb').write(mtl_with_reflection(tmpl, car_tmpl, name, env))
+            continue
         tex = None
         if m and m.texture:
             tex = pixmaps.rgba(m.texture)

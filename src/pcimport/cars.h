@@ -78,6 +78,12 @@ int copy_placeholders(Install& inst, const fs::path& content, const std::string&
 // ---- controls screen ------------------------------------------------------------------------------
 // Adds the steering deadzone slider to the controls options screen. Returns the layouts rewritten.
 int install_controls_screen(Install& inst);
+// The options screen's "restore purchases" button (Google Play; no use here) becomes GRAPHICS, opening a
+// new graphics options screen (texture filtering on/off; see controller.cpp's settings). Its layouts are
+// made from the audio screen's. Returns the number of layouts made (0: the screens weren't recognised).
+int install_graphics_screen(Install& inst);
+// A compiled straight-line Lua file (UI layouts) as source text (developer option --lua-source).
+std::string lua_source(const Bytes& compiled);
 
 // ---- Splat Pack --------------------------------------------------------------------------------
 // Converts the Splat Pack cars the Android game lacks and adds them to the roster and opponents.

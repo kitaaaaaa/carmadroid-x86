@@ -1,4 +1,5 @@
 #include "controller.h"
+#include "hle/gles.h"
 #include "elf_loader.h"
 #include "hle/android.h"
 #include "hle/hle_common.h"
@@ -96,25 +97,46 @@ bool is_paused() {
 
 float axis(SDL_GameControllerAxis a) { return SDL_GameControllerGetAxis(g_pad, a) / 32767.0f; }
 
-// Steering deadzone in percent: the controls screen's "steering_deadzone" slider (see pc_import's controls
-// screen), kept in userdata/carmadroid.ini. Read on the main thread, set on the game thread.
+// Settings the port adds to the game's options screens, kept in userdata/carmadroid.ini. Each is a UI
+// property ("properties.<name>" in the screens' Lua) kept in step with the value here.
+// Steering deadzone in percent: the controls screen's slider (see pc_import's controls screen).
+// Read on the main thread, set on the game thread.
 std::atomic<float> g_steer_deadzone{kDefaultSteerDeadzone};
+// Texture filtering, 1 = on (smooth), 0 = off (nearest-neighbour): the graphics options screen.
+std::atomic<float> g_texture_filtering{1};
+
+struct Setting {
+    const char* name;
+    std::atomic<float>* value;
+    float min, max;
+    u32 name_str = 0;  // guest copy of the name
+    float last = -1;   // the value last seen in the property
+};
+Setting g_settings[] = {
+    {"steering_deadzone", &g_steer_deadzone, 0, 50},
+    {"texture_filtering", &g_texture_filtering, 0, 1},
+};
 
 std::string settings_path() { return hle::g_config.root + "/carmadroid.ini"; }
 
 void load_settings() {
     if (FILE* f = fopen(settings_path().c_str(), "r")) {
         char line[128];
-        float v;
         while (fgets(line, sizeof line, f))
-            if (sscanf(line, "steering_deadzone=%f", &v) == 1 && v >= 0 && v <= 50) g_steer_deadzone = v;
+            for (Setting& st : g_settings) {
+                const size_t n = strlen(st.name);
+                float v;
+                if (!strncmp(line, st.name, n) && line[n] == '=' && sscanf(line + n + 1, "%f", &v) == 1 &&
+                    v >= st.min && v <= st.max)
+                    *st.value = v;
+            }
         fclose(f);
     }
 }
 
 void save_settings() {
     if (FILE* f = fopen(settings_path().c_str(), "w")) {
-        fprintf(f, "steering_deadzone=%g\n", (double)g_steer_deadzone.load());
+        for (const Setting& st : g_settings) fprintf(f, "%s=%g\n", st.name, (double)st.value->load());
         fclose(f);
     }
 }
@@ -122,12 +144,15 @@ void save_settings() {
 u32 fbits(float v) { u32 u; memcpy(&u, &v, 4); return u; }
 float bitsf(u32 u) { float v; memcpy(&v, &u, 4); return v; }
 
-// Keeps the "steering_deadzone" UI property and g_steer_deadzone in step: the saved value goes to the
-// property once the menu system is up, then slider changes come back (and are saved).
-void sync_deadzone_property(Cpu& c, u32 base) {
-    static u32 frame = 0, name = 0;
-    static bool pushed = false;
-    static float last = -1;
+void apply_setting(const Setting& st) {
+    if (st.value == &g_texture_filtering) gles::set_texture_filtering(g_texture_filtering >= 0.5f);
+}
+
+// Keeps the settings' UI properties and their values in step: the saved values go to the properties once
+// the menu system is up, then changes made on the screens come back (and are saved).
+void sync_settings(Cpu& c, u32 base) {
+    static u32 frame = 0;
+    static bool loaded = false, pushed = false;
     if (frame++ % 30) return;
     // CGameLube::GetProperty goes through CMenuSystem -> its CLube -> a virtual call (vtable + 0xc0): wait
     // until that whole chain exists (the objects are there before they are constructed).
@@ -139,28 +164,37 @@ void sync_deadzone_property(Cpu& c, u32 base) {
     if (!clube || !mem::valid(clube, 4)) return;
     const u32 vtable = mem::r32(clube);
     if (!vtable || !mem::valid(vtable + 0xc0, 4) || !mem::r32(vtable + 0xc0)) return;
-    if (!name) {
-        name = mem::strdup("steering_deadzone");
+    if (!loaded) {
+        loaded = true;
         load_settings();
+        for (Setting& st : g_settings) {
+            st.name_str = mem::strdup(st.name);
+            apply_setting(st);
+        }
     }
-    const u32 prop = c.call(base + kGetProperty, {lube, name});
-    if (!prop) return;
-    if (!pushed) {
-        pushed = true;
-        last = g_steer_deadzone;
-        c.call(base + kPropSetScalar, {prop, fbits(last)});
-        return;
+    bool changed = false;
+    for (Setting& st : g_settings) {
+        const u32 prop = c.call(base + kGetProperty, {lube, st.name_str});
+        if (!prop) continue;
+        if (!pushed) {
+            st.last = *st.value;
+            c.call(base + kPropSetScalar, {prop, fbits(st.last)});
+            continue;
+        }
+        float v = bitsf(c.call(base + kPropGetScalar, {prop}));
+        if (!(v >= st.min)) v = st.min;
+        if (v > st.max) v = st.max;
+        v = std::round(v);
+        if (v != st.last) {
+            st.last = v;
+            *st.value = v;
+            apply_setting(st);
+            changed = true;
+            LOGI("settings: %s = %g", st.name, (double)v);
+        }
     }
-    float v = bitsf(c.call(base + kPropGetScalar, {prop}));
-    if (!(v >= 0)) v = 0;
-    if (v > 50) v = 50;
-    v = std::round(v);
-    if (v != last) {
-        last = v;
-        g_steer_deadzone = v;
-        save_settings();
-        LOGI("controller: steering deadzone %g%%", (double)v);
-    }
+    pushed = true;
+    if (changed) save_settings();
 }
 
 float deadzone(float v, float dz) {
@@ -396,7 +430,7 @@ void update() {
 void on_game_frame(Cpu& c) {
     u32 base = lib_base();
     if (!base) return;
-    sync_deadzone_property(c, base);
+    sync_settings(c, base);
     static const u32 in_replay = sym("_Z15AR_InReplayModev");
     g_in_replay = platform::in_race() && in_replay && (c.call(in_replay, {}) & 0xFF) != 0;
     u32 steer_mode = base + kInputState + kSteerModeOff;

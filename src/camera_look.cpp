@@ -5,6 +5,7 @@
 #include "controller.h"
 #include "elf_loader.h"
 #include "memory.h"
+#include "pc_content.h"
 #include <SDL.h>
 #include <atomic>
 #include <cmath>
@@ -88,6 +89,7 @@ void apply_patches() {
     if (!fn) { LOGE("camera: Camera_UpdateAll not found"); return; }
     g_orig = hle::hook_function(fn, "Camera_UpdateAll", [](Cpu& c) {
         c.call(g_orig, {c.r(0), c.r(1)});  // (float, float) in r0/r1 (softfp)
+        pc_content::place_bonnet_camera();  // (before the head turn, which keeps the position)
         after_camera_update();
     });
 }

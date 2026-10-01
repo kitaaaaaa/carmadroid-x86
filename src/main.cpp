@@ -12,6 +12,7 @@
 #include "camera_look.h"
 #include "pc_content.h"
 #include "pc_import.h"
+#include "pcimport/cars.h"
 #include "hle/android.h"
 #include "hle/hle_common.h"
 #include "apk.h"
@@ -126,6 +127,17 @@ int main(int argc, char** argv) {
         else if (a == "--shot-every" && i + 1 < argc) platform::g_shot_every = atoi(argv[++i]);
         else if (a == "--exit-after" && i + 1 < argc) exit_after = atoi(argv[++i]);
         else if (a == "--dump-zones") debug::g_dump_zones = true;
+        else if (a == "--lua-source" && i + 2 < argc) {  // --lua-source <compiled .LOL> <out .lua> (developer)
+            try {
+                const std::string s = pcimport::lua_source(pcimport::read_file(argv[i + 1]));
+                FILE* f = fopen(argv[i + 2], "wb");
+                if (f) fwrite(s.data(), 1, s.size(), f), fclose(f);
+                return f ? 0 : 1;
+            } catch (const std::exception& e) {
+                fprintf(stderr, "%s\n", e.what());
+                return 1;
+            }
+        }
         else if (a == "--censored") content::g_restore = false;
         else if (a == "--unlock-all-cars") content::g_unlock_all_cars = true;
         else if (a == "--car" && i + 1 < argc) content::g_force_car = argv[++i];

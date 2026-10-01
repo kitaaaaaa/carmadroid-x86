@@ -10,7 +10,8 @@ namespace {
 namespace fs = std::filesystem;
 
 // Bump when the converter's output changes: installs made by an older version are redone.
-constexpr int kVersion = 15;  // 14: the Monster Masher, physics from the Twister; 15: its shape covers its tyres  // 2: car reflections; 6: collision box as originally (3-5: collision experiments);
+constexpr int kVersion = 18;  // 14: the Monster Masher, physics from the Twister; 15: its shape covers its tyres;
+                              // 16/17: environment-mapped windows (reflecting DRSKY); 18: graphics options screen  // 2: car reflections; 6: collision box as originally (3-5: collision experiments);
                              // 7: steering deadzone slider; 8-10: handling and shape from each car's stock counterpart;
                               // 11: short names
 
@@ -92,6 +93,8 @@ void install(const std::string& game_dir, const std::string& carma, const std::s
     try {
         const int screens = pcimport::install_controls_screen(inst);
         LOGI("pc import: steering deadzone slider added to %d controls screen layouts", screens);
+        const int graphics = pcimport::install_graphics_screen(inst);
+        LOGI("pc import: graphics options screen added (%d layouts)", graphics);
         if (has_data(carma) && has_data(carsplat)) {
             const int cars = pcimport::install_splat_pack(inst, fs::path(carsplat) / "DATA", fs::path(carma) / "DATA");
             LOGI("pc import: %d Splat Pack cars installed", cars);

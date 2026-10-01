@@ -13,7 +13,12 @@ constexpr double kScale = 6.9;  // C1 world units -> metres (dethrace WORLD_SCAL
 const std::map<std::string, std::string> kWheels = {
     {"FLWHEEL.ACT", "whlFL"}, {"FRWHEEL.ACT", "whlFR"}, {"RLWHEEL.ACT", "whlRL"}, {"RRWHEEL.ACT", "whlRR"}};
 
-constexpr double kShine = 0.35;  // shine mask brightness relative to the texture (stock masks average ~13-45/255)
+constexpr double kShine = 0.35;
+// PC environment-mapped materials (BRender ENVIRONMENT_I/L flags; the windows' shared "DRSKY" sky): the PC
+// draws them as a reflection of their texture only (the orange sunset of DRSKY.PIX). Here: dark glass with a
+// near-white shine mask, reflecting that texture at full strength through the game's reflection pass.
+constexpr u32 kEnvMapFlags = 0x08 | 0x10;
+const std::array<u8, 3> kGlass = {28, 34, 44}, kGlassShine = {235, 235, 235};  // shine mask brightness relative to the texture (stock masks average ~13-45/255)
 
 using M12 = std::array<double, 12>;
 
@@ -448,6 +453,40 @@ void convert_car(Install& inst, const std::vector<fs::path>& data_dirs, const st
             std::string k = pc_name;
             if (size_t t = k.find(".MAT"); t != std::string::npos) k.erase(t, 4);
             if (auto it2 = materials.find(upper(k)); it2 != materials.end()) m = &it2->second;
+        }
+        std::string base_key = pc_name;
+        if (size_t t = base_key.find(".MAT"); t != std::string::npos) base_key.erase(t, 4);
+        if ((m && (m->flags & kEnvMapFlags)) || base_key == "DRSKY") {
+            // The reflected texture: the material's own (DRSKY.PIX for the windows), from any PIX file.
+            Rgba reflected;
+            const std::string pix = m && !m->texture.empty() ? m->texture : "DRSKY.PIX";
+            if (!pixmaps.rgba(pix, reflected)) {
+                for (const auto& d : data_dirs) {
+                    const fs::path p = d / "PIXELMAP" / pix;
+                    if (!fs::exists(p)) continue;
+                    PixelmapSource one;
+                    one.palette = &palette;
+                    one.maps = read_all_pix(p);
+                    if (one.rgba(pix, reflected)) break;
+                }
+            }
+            std::string env = "env";  // (the track's sky, if the texture is missing)
+            if (reflected.w > 0) {
+                int w = 1, h = 1;  // power-of-two size, as the game's textures
+                while (w * 2 <= reflected.w) w *= 2;
+                while (h * 2 <= reflected.h) h *= 2;
+                for (size_t k = 3; k < reflected.px.size(); k += 4) reflected.px[k] = 255;
+                env = name + "_env";
+                inst.write(out_dir / (upper(env) + ".IMG"), img_plain(resize(reflected, w, h)));
+            }
+            Rgba glass(8, 8), shine(8, 8);
+            for (int k = 0; k < 64; k++)
+                for (int c = 0; c < 3; c++) glass.px[k * 4 + c] = kGlass[c], shine.px[k * 4 + c] = kGlassShine[c];
+            for (int k = 0; k < 64; k++) glass.px[k * 4 + 3] = shine.px[k * 4 + 3] = 255;
+            inst.write(out_dir / (upper(name) + ".IMG"), img_plain(glass));
+            inst.write(out_dir / (upper(name) + "_S.IMG"), img_plain(shine));
+            inst.write(out_dir / (upper(name) + ".MTL"), mtl_with_reflection(mtl_template, car_mtl_template, name, env));
+            continue;
         }
         Rgba tex;
         const bool textured = m && !m->texture.empty() && pixmaps.rgba(m->texture, tex);

@@ -14,4 +14,8 @@ extern bool g_cockpit;  // draw the cockpit overlay in the in-car view
 
 void apply_patches();   // after libParsons.so is loaded
 
+// After the game has placed its cameras: in the in-car view of a car with a PC cockpit, puts the camera
+// at the PC driver's head (the PC car's bonnet model is then drawn from there, under the dashboard).
+void place_bonnet_camera();
+
 }  // namespace pc_content

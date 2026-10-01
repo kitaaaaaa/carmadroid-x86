@@ -856,14 +856,15 @@ MtlParts parse_mtl(const Bytes& mtl) {
 }
 }  // namespace
 
-Bytes mtl_with_reflection(const Bytes& tmpl, const Bytes& car_tmpl, const std::string& texture) {
+Bytes mtl_with_reflection(const Bytes& tmpl, const Bytes& car_tmpl, const std::string& texture,
+                          const std::string& env_texture) {
     const MtlParts one = parse_mtl(tmpl), car = parse_mtl(car_tmpl);
     if (one.stages.size() != 1 || car.stages.size() != 3) throw std::runtime_error("unexpected material templates");
     Writer w;
     w.raw(one.head);
     w.u32_(3);
     const std::pair<std::string, const Bytes*> stages[3] = {
-        {texture, &one.stages[0].second}, {"env", &car.stages[1].second}, {texture + "_s", &car.stages[2].second}};
+        {texture, &one.stages[0].second}, {env_texture, &car.stages[1].second}, {texture + "_s", &car.stages[2].second}};
     for (const auto& [name, settings] : stages) {
         w.pstr(name);
         w.raw(*settings);

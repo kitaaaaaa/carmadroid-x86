@@ -11,6 +11,9 @@ extern std::string g_dir;
 // The Splat Pack's folder (...\Carmageddon1\CARSPLAT), for its cars' cockpits. Optional.
 extern std::string g_splat_dir;
 extern bool g_cockpit;  // draw the cockpit overlay in the in-car view
+// bonnet_fits.txt (next to the exe): how each car's PC bonnet is fitted to the in-car view. Written with
+// the defaults if missing; re-read when it changes.
+extern std::string g_bonnet_fits_path;
 
 void apply_patches();   // after libParsons.so is loaded
 

@@ -1,0 +1,33 @@
+# Bonnet fitting for the in-car view (cars with a PC cockpit): one line per car, by the game's car name
+# (e.g. BLKEAGLE, ANNIECAR). "default" is for cars not listed. Changes apply while the game runs.
+#   raise       draw the bonnet this share of the screen height higher (more of it above the dashboard)
+#   shift_left  draw it this share of the screen width further left
+#   roll_left   turn it this many degrees anticlockwise
+#
+# car        raise  shift_left  roll_left
+default      0      0           0
+BLKEAGLE     0.15   0.15        0
+ANNIECAR     0.15   0.15        0
+BIGAPC       0      0           0
+BUGGIT       0      0           0
+BUSTER       0      0           0
+CAR333       0      0           0
+DOOZER       0      0           0
+DUMP         0      0           0
+IVAN         0      0           0
+JAQUES       0      0           0
+MONSTER      0      0           0
+MUSCLE       0      0           0
+NEWANNIE     0      0           0
+NEWEAGLE     0      0           0
+OTIS         0      0           0
+PITBULL      0      0           0
+PORK         0      0           0
+ROADHOG      0      0           0
+SCREWIE      0      0           0
+SEMI         0      0           0
+SLED         0      0           0
+SUBFRAME     0      0           0
+TOOHORSE     0      0           0
+VLAD         0      0           0
+VLAD2        0      0           0

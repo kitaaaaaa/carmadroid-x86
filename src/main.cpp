@@ -227,6 +227,7 @@ int main(int argc, char** argv) {
         }
     }
     pc_content::g_splat_dir = splat_dir;
+    pc_content::g_bonnet_fits_path = (exe_dir() / "bonnet_fits.txt").string();
 
     // --- Game files -------------------------------------------------------------------------
     // Unpacked game data (--extract-data) in the gamedata folder next to the exe is used automatically.

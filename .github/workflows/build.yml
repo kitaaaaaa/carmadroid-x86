@@ -39,7 +39,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory dist | Out-Null
-          Copy-Item build/Release/carmadroid.exe, build/Release/SDL2.dll, README.md, LICENSE -Destination dist/
+          Copy-Item build/Release/carmadroid.exe, build/Release/SDL2.dll, README.md, LICENSE, bonnet_fits.txt -Destination dist/
           Compress-Archive -Path dist/* -DestinationPath carmadroid-x86-windows-x64.zip
 
       - name: Upload build artifact

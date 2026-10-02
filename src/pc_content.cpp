@@ -28,6 +28,7 @@ namespace pc_content {
 
 std::string g_dir;
 std::string g_splat_dir;
+std::string g_bonnet_fits_path;
 bool g_cockpit = true;
 
 namespace {
@@ -39,26 +40,98 @@ constexpr u32 kVehicleName = 4;           // char* car name, e.g. "BLKEAGLE" (sa
 // The PC cockpit images are 700x528; the game showed the centre of them on a 640x480 screen.
 // We map the full width and the middle 480 lines to the screen (a slight horizontal stretch on 16:9).
 constexpr float kImgW = 700, kImgTop = 24, kImgH = 480;
-// How each car's PC bonnet model is fitted to the view, by car name (as the game calls it, e.g.
-// "BLKEAGLE"); cars not listed use kDefaultBonnetFit.
+// How each car's PC bonnet model is fitted to the view (bonnet_fits.txt):
 //   raise:      this much of the screen height higher than its place in the view, so more of it shows
 //               above the dashboard (as on the PC, where the dashboard sat lower on the screen)
 //   shift_left: this much of the screen width further left (straightens the look of bonnets placed for a
 //               driver sitting off-centre)
 //   roll_left:  turned this many degrees anticlockwise about the view's centre
 struct BonnetFit {
-    const char* car;
-    float raise, shift_left, roll_left;
-};
-constexpr BonnetFit kDefaultBonnetFit = {"", 0.0f, 0.0f, 0.0f};  // (the bonnet where the PC placed it)
-constexpr BonnetFit kBonnetFits[] = {
-    {"BLKEAGLE", 0.15f, 0.15f, 0.0f},
+    float raise = 0, shift_left = 0, roll_left = 0;  // (no change: the bonnet where the PC placed it)
 };
 
+// The file as the game writes it next to the exe when it's missing (the same as bonnet_fits.txt in the
+// source tree, which the release zip carries).
+const char* const kBonnetFitsFile = R"(# Bonnet fitting for the in-car view (cars with a PC cockpit): one line per car, by the game's car name
+# (e.g. BLKEAGLE, ANNIECAR). "default" is for cars not listed. Changes apply while the game runs.
+#   raise       draw the bonnet this share of the screen height higher (more of it above the dashboard)
+#   shift_left  draw it this share of the screen width further left
+#   roll_left   turn it this many degrees anticlockwise
+#
+# car        raise  shift_left  roll_left
+default      0      0           0
+BLKEAGLE     0.15   0.15        0
+ANNIECAR     0.15   0.15        0
+BIGAPC       0      0           0
+BUGGIT       0      0           0
+BUSTER       0      0           0
+CAR333       0      0           0
+DOOZER       0      0           0
+DUMP         0      0           0
+IVAN         0      0           0
+JAQUES       0      0           0
+MONSTER      0      0           0
+MUSCLE       0      0           0
+NEWANNIE     0      0           0
+NEWEAGLE     0      0           0
+OTIS         0      0           0
+PITBULL      0      0           0
+PORK         0      0           0
+ROADHOG      0      0           0
+SCREWIE      0      0           0
+SEMI         0      0           0
+SLED         0      0           0
+SUBFRAME     0      0           0
+TOOHORSE     0      0           0
+VLAD         0      0           0
+VLAD2        0      0           0
+)";
+
+std::map<std::string, BonnetFit> g_bonnet_fits;  // by upper-case car name, plus "DEFAULT"
+std::filesystem::file_time_type g_bonnet_fits_time{};
+u64 g_bonnet_fits_checked = 0;
+
+// Reads bonnet_fits.txt when it has changed (looked at about once a second); writes it if missing.
+void update_bonnet_fits() {
+    if (g_bonnet_fits_path.empty()) return;
+    const u64 now = SDL_GetTicks64();
+    if (g_bonnet_fits_checked && now - g_bonnet_fits_checked < 1000) return;
+    g_bonnet_fits_checked = now;
+    const std::filesystem::path path(g_bonnet_fits_path);
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) {
+        std::ofstream(path, std::ios::binary) << kBonnetFitsFile;
+        LOGI("pc: wrote %s", g_bonnet_fits_path.c_str());
+    }
+    const auto t = std::filesystem::last_write_time(path, ec);
+    if (ec || t == g_bonnet_fits_time) return;
+    g_bonnet_fits_time = t;
+    std::map<std::string, BonnetFit> fits;
+    std::ifstream f(path);
+    std::string line;
+    while (std::getline(f, line)) {
+        if (size_t c = line.find('#'); c != std::string::npos) line.resize(c);
+        std::istringstream ss(line);
+        std::string car;
+        BonnetFit fit;
+        if (!(ss >> car)) continue;
+        if (!(ss >> fit.raise >> fit.shift_left >> fit.roll_left)) {
+            LOGE("pc: bonnet_fits.txt: can't read the line for %s", car.c_str());
+            continue;
+        }
+        for (char& ch : car) ch = (char)toupper((unsigned char)ch);
+        fits[car] = fit;
+    }
+    g_bonnet_fits = std::move(fits);
+    LOGI("pc: bonnet fits read (%zu lines)", g_bonnet_fits.size());
+}
+
 BonnetFit bonnet_fit(const std::string& car) {
-    for (const BonnetFit& f : kBonnetFits)
-        if (car == f.car) return f;
-    return kDefaultBonnetFit;
+    std::string key = car;
+    for (char& ch : key) ch = (char)toupper((unsigned char)ch);
+    auto it = g_bonnet_fits.find(key);
+    if (it == g_bonnet_fits.end()) it = g_bonnet_fits.find("DEFAULT");
+    return it != g_bonnet_fits.end() ? it->second : BonnetFit{};
 }
 constexpr float kSideViewDeg = 40;  // head turn at which the side cockpit image is shown
 constexpr float kPcScale = 6.9f;    // PC world units -> metres (dethrace WORLD_SCALE)
@@ -127,7 +200,6 @@ struct Cockpit {
     float head_pc[3] = {};  // the driver's head (PC car units and axes)
     float head[3] = {};     // the same in the game's car space (metres, z flipped)
     std::vector<BonnetBatch> bonnet;  // the PC in-car bonnet model (car space, PC units)
-    BonnetFit fit = kDefaultBonnetFit;
 };
 
 std::map<std::string, std::shared_ptr<Image>> g_images;
@@ -429,7 +501,8 @@ void load_bonnet(const std::vector<std::string>& lines, std::vector<BonnetBatch>
 
 // DATA/64X48X8/CARS/<car>.TXT: forward/left/right images (each followed by a rectangle),
 // speedo/tacho/gear lines, then the hands frame count and one line per frame.
-std::unique_ptr<Cockpit> load_cockpit(const std::string& car) {
+// dash: the car whose dashboard images are used; body: the car whose head position and bonnet are used.
+std::unique_ptr<Cockpit> load_cockpit_files(const std::string& car, const std::string& body) {
     auto lines = text_lines(data_path("64X48X8/CARS/" + car + ".TXT"));
     // Converted cars whose PC name starts with a digit are called Car<name> (CAR333: the PC's 333).
     if (lines.empty() && car.size() > 3 && car.compare(0, 3, "CAR") == 0 && isdigit((unsigned char)car[3]))
@@ -481,9 +554,9 @@ std::unique_ptr<Cockpit> load_cockpit(const std::string& car) {
         }
     }
     // DATA/CARS/<car>.TXT: "START OF DRIVABLE STUFF", then the driver's head offset (PC car units).
-    auto car_lines = text_lines(data_path("CARS/" + car + ".TXT"));
-    if (car_lines.empty() && car.size() > 3 && car.compare(0, 3, "CAR") == 0 && isdigit((unsigned char)car[3]))
-        car_lines = text_lines(data_path("CARS/" + car.substr(3) + ".TXT"));
+    auto car_lines = text_lines(data_path("CARS/" + body + ".TXT"));
+    if (car_lines.empty() && body.size() > 3 && body.compare(0, 3, "CAR") == 0 && isdigit((unsigned char)body[3]))
+        car_lines = text_lines(data_path("CARS/" + body.substr(3) + ".TXT"));
     for (size_t k = 0; k + 1 < car_lines.size(); k++) {
         if (car_lines[k] != "START OF DRIVABLE STUFF") continue;
         const auto f = split(car_lines[k + 1]);
@@ -498,8 +571,19 @@ std::unique_ptr<Cockpit> load_cockpit(const std::string& car) {
         break;
     }
     if (cp->has_head) load_bonnet(car_lines, cp->bonnet);
-    cp->fit = bonnet_fit(car);
     LOGI("pc: loaded cockpit for %s (%zu hands frames)", car.c_str(), cp->hands.size());
+    return cp;
+}
+
+// The car's own PC cockpit and bonnet. A car with no dashboard image but a bonnet of its own uses the Eagle's
+// dashboard with its own bonnet; one with neither gets nothing.
+std::unique_ptr<Cockpit> load_cockpit(const std::string& car) {
+    auto cp = load_cockpit_files(car, car);
+    if (!cp && upper_case(car) != "BLKEAGLE") {
+        cp = load_cockpit_files("BLKEAGLE", car);
+        if (cp && cp->bonnet.empty()) cp = nullptr;
+        if (cp) LOGI("pc: %s uses the Eagle's dashboard with its own bonnet", car.c_str());
+    }
     return cp;
 }
 
@@ -627,11 +711,11 @@ float g_cam_fov = 55.55f;  // the in-car camera's vertical field of view (degree
 
 // The bonnet model from the driver's head, looking along the car (PC: -z) with the head turned by yaw
 // degrees (positive = right), in the game camera's field of view. Drawn over the world, under the dashboard.
-void draw_bonnet(const Cockpit& cp, int w, int h, float yaw) {
+void draw_bonnet(const Cockpit& cp, const BonnetFit& fit, int w, int h, float yaw) {
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadIdentity();
-    glTranslatef(-cp.fit.shift_left * 2, cp.fit.raise * 2, 0);  // (screen width and height = 2 in clip space)
+    glTranslatef(-fit.shift_left * 2, fit.raise * 2, 0);  // (screen width and height = 2 in clip space)
     const float near_clip = 0.01f, far_clip = 10.0f;  // PC car units (PC: GENERAL.TXT hither)
     // As the PC drew it on its 4:3 screen, then stretched across the screen like the dashboard image
     // (whose 700 pixels fill the width where the PC showed 640).
@@ -641,7 +725,7 @@ void draw_bonnet(const Cockpit& cp, int w, int h, float yaw) {
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
     glLoadIdentity();
-    glRotatef(cp.fit.roll_left, 0, 0, 1);  // (about the view direction; positive = anticlockwise)
+    glRotatef(fit.roll_left, 0, 0, 1);  // (about the view direction; positive = anticlockwise)
     glRotatef(yaw, 0, 1, 0);
     glTranslatef(-cp.head_pc[0], -cp.head_pc[1], -cp.head_pc[2]);
 
@@ -737,7 +821,10 @@ void draw_cockpit() {
         const bool behind = std::fabs(yaw) > 120;  // looking out of the back: no cockpit
         const int view = yaw <= -kSideViewDeg ? 1 : yaw >= kSideViewDeg ? 2 : 0;
         const Image* img = cp->view[view] ? cp->view[view].get() : cp->view[0].get();
-        if (!behind && !cp->bonnet.empty()) draw_bonnet(*cp, w, h, yaw);
+        if (!behind && !cp->bonnet.empty()) {
+            update_bonnet_fits();
+            draw_bonnet(*cp, bonnet_fit(name), w, h, yaw);
+        }
         if (!behind) quad(*img, 0, 0);
         Instruments in;
         if (view == 0 && !behind && read_instruments(veh, in)) draw_instruments(*cp, in);
